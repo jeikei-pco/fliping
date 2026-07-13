@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jk-flipping-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: jk_flipping
+      POSTGRES_USER: jk_user
+      POSTGRES_PASSWORD: jk_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jk_user -d jk_flipping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: jk-flipping-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  grid-worker:
+    build:
+      context: ./apps/python-workers/grid_worker
+      dockerfile: Dockerfile
+    container_name: jk-flipping-grid-worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PYTHONUNBUFFERED: "1"
+
+volumes:
+  postgres_data:

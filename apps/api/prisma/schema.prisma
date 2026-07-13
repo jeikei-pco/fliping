@@ -1,0 +1,97 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Get a free hosted Postgres database in seconds: `npx create-db`
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AppUser {
+  id           String       @id
+  email        String       @unique
+  displayName  String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  credentials  Credential[]
+  alerts       Alert[]
+  opportunities Opportunity[]
+  engineStatuses EngineStatus[]
+  @@map("app_users")
+}
+
+model Credential {
+  id               String   @id
+  userId           String
+  providerKind     String
+  provider         String
+  label            String
+  encryptedPayload String   @db.Text
+  sandbox          Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, provider])
+  @@index([userId])
+  @@map("credentials")
+}
+
+model Alert {
+  id          String    @id
+  userId      String
+  motor       String    // "tech" | "crypto" | "real-estate" | "saas"
+  title       String
+  description String    @db.Text
+  sourceUrl   String?   @db.Text
+  severity    String    // "low" | "medium" | "high"
+  read        Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  user        AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([motor])
+  @@index([createdAt(sort: Desc)])
+  @@map("alerts")
+}
+
+model Opportunity {
+  id           String   @id
+  userId       String
+  motor        String   // "real-estate" | "saas"
+  title        String
+  description  String   @db.Text
+  sourceUrl    String?  @db.Text
+  aiAnalysis   String   @db.Text
+  estimatedValue String?
+  estimatedRepair  String?
+  dealScore    Int?     // 1-10, higher is better
+  tags         String   @db.Text
+  status       String   @default("new") // "new" | "reviewed" | "archived"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([motor])
+  @@index([createdAt(sort: Desc)])
+  @@map("opportunities")
+}
+
+model EngineStatus {
+  id            String   @id
+  userId        String
+  motor         String   // "tech" | "real-estate" | "saas"
+  enabled       Boolean  @default(false)
+  startedAt     DateTime?
+  lastRunAt     DateTime?
+  lastResult    String?  @db.Text
+  lastError     String?  @db.Text
+  config        String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, motor])
+  @@index([userId])
+  @@map("engine_statuses")
+}

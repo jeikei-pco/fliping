@@ -1,0 +1,25 @@
+{
+  "name": "flipping-jeikei",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo JK-Flipping",
+  "scripts": {
+    "dev:api": "npm run dev --workspace apps/api",
+    "build:api": "npm run build --workspace apps/api",
+    "start:api": "npm run start --workspace apps/api",
+    "dev:mobile": "npm run start --workspace apps/mobile",
+    "db:up": "docker compose up -d postgres",
+    "worker:up": "docker compose up -d --build redis grid-worker",
+    "worker:logs": "docker compose logs -f grid-worker",
+    "db:down": "docker compose down",
+    "prisma:generate": "npm run prisma:generate --workspace apps/api",
+    "prisma:migrate": "npm run prisma:migrate --workspace apps/api"
+  },
+  "workspaces": [
+    "apps/api",
+    "apps/mobile"
+  ],
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
