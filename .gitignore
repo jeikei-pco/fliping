@@ -1,5 +1,5 @@
 apps\*\node_modules
 apps\mobile\.expo
-apps\mobile\dist
+apps\*\dist
 apps\python-workers\grid_worker\.venv
 node_modules
