@@ -1,0 +1,10 @@
+Para implementar la lógica de selección entre OKX Demo y OKX Real en tus aplicaciones (api, mobile y python-workers), debes asegurarte de que el parámetro options.sandbox de ccxt se ajuste dinámicamente basándose en la configuración de la credencial.Dado que tienes TDAH, he estructurado los pasos de manera clara y directa para que puedas implementarlo sin perder el enfoque.1. Definición del ParámetroEn ccxt, el modo demo se habilita pasando {'sandbox': True} en el constructor de la instancia del exchange:Python# Ejemplo en Python (aplicable a ccxt)
+exchange = ccxt.okx({
+    'apiKey': 'TU_API_KEY',
+    'secret': 'TU_SECRET',
+    'password': 'TU_PASSWORD',
+    'options': {
+        'sandbox': es_modo_demo  # Booleano: True para demo, False para real
+    }
+})
+2. Implementación en apps/apiDebes revisar el archivo apps/api/src/infrastructure/services/ccxt-exchange-service.ts.  Acción: Cuando el servicio de credenciales obtenga el registro de la DB, debe extraer un campo isDemo (o similar).Lógica: Pasa ese booleano al constructor de ccxt bajo la propiedad options: { sandbox: credential.isDemo }.Nota: Asegúrate de que las credenciales (API Keys) sean distintas para el entorno demo y el real en OKX, ya que las claves de demo no funcionan en el entorno real.3. Implementación en apps/python-workersEn el grid_worker, la lógica se encuentra en los motores que ejecutan los procesos de trading, específicamente en apps/python-workers/grid_worker/engine/.  Revisión: Verifica apps/python-workers/grid_worker/engine/okx_ws.py y los archivos donde inicializas ccxt.  Acción: Al instanciar el worker, el api debe enviar el estado de la configuración (isDemo) a través de la cola de mensajes (grid-queue.ts) hacia el worker.  Configuración: El worker debe usar ese valor para configurar la conexión de ccxt antes de realizar backtest, optimize u operar.  4. Resumen de Flujo para tu RevisiónConfiguración en AppModo ccxtComportamientoisDemo = truesandbox: trueUsa servidores okx-demo para todo.isDemo = falsesandbox: falseUsa servidores okx-real (producción).
