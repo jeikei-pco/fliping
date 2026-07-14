@@ -1,12 +1,24 @@
 import sys
 import asyncio
 import os
+import os
+
+# Cargar variables de entorno desde tests/.env
+env_path = os.path.join(os.path.dirname(__file__), "tests", ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip().strip("\"'")
+
 import logging
 import json
 import redis.asyncio as redis
 from bullmq import Worker
 
-from engine.okx_ws import OkxWsClient, detect_active_exchange_grid
+from engine.okx_ws import OkxWsClient, detect_active_exchange_grid, _create_okx_exchange
 from engine.consistency_screener import scan_all_usdt_futures
 from engine.fast_backtester import run_vectorized_backtest
 from engine.ai_optimizer import get_ai_grid_params_batch
@@ -47,6 +59,24 @@ async def update_redis_metrics():
             except Exception as e:
                 pass
         await asyncio.sleep(2)
+
+async def test_okx_connection(api_key, secret, passphrase, sandbox):
+    """
+    Comprueba si las credenciales son válidas para acceder a la API privada.
+    """
+    mode = "DEMO/SANDBOX" if sandbox else "REAL"
+    logger.info(f"Probando conexión a OKX ({mode})...")
+    exchange = _create_okx_exchange(api_key, secret, passphrase, sandbox=sandbox)
+    try:
+        # fetch_balance es un endpoint privado ideal para validar credenciales y conexión
+        await exchange.fetch_balance()
+        logger.info(f"✅ Conexión EXITOSA a OKX ({mode}) - API Privada accesible.")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Fallo en conexión a OKX ({mode}): {e}")
+        return False
+    finally:
+        await exchange.close()
 
 async def watchdog_loop(api_key, secret, passphrase, sandbox):
     global engine_instance, redis_client, best_opportunity, current_task_name
@@ -192,9 +222,17 @@ async def process_job(job, job_token):
         # Usar el valor de sandbox que viene en el job (configurado en la API)
         sandbox = data.get("sandbox", True)
         
+        mode_str = "DEMO/SANDBOX" if sandbox else "REAL"
+        logger.info(f"🔐 Modo {mode_str} activo: Credenciales OKX obtenidas desde la base de datos (vía Node).")
+        
         if not api_key or not secret:
             logger.error("Credenciales incompletas enviadas al worker.")
             return {"status": "Error", "message": "Credenciales incompletas"}
+            
+        # Comprobación de conexión a la red correspondiente según configuración
+        mode_str = "DEMO/SANDBOX" if sandbox else "REAL"
+        logger.info(f"Realizando comprobación de conexión a la API de OKX en modo {mode_str}...")
+        await test_okx_connection(api_key, secret, passphrase, sandbox=sandbox)
         
         watchdog_task = asyncio.create_task(watchdog_loop(api_key, secret, passphrase, sandbox))
             

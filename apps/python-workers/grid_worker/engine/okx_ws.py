@@ -1,4 +1,5 @@
 import asyncio
+import re
 import ccxt.pro as ccxt
 import logging
 import pandas as pd
@@ -177,6 +178,12 @@ class OkxWsClient:
         ai_recommendation=None,
         resume_existing_grid=False,
     ):
+        # Guardar credenciales para posible fallback a sandbox
+        self._api_key = api_key
+        self._secret = secret
+        self._passphrase = passphrase
+        self._sandbox = sandbox
+
         self.symbol = symbol
         self.timeframe = timeframe
         self.running = False
@@ -195,7 +202,10 @@ class OkxWsClient:
             "last_price": None,
             "symbol": symbol,
             "mode": "resume" if resume_existing_grid else "create",
+            "exchange_mode": "DEMO/SANDBOX" if sandbox else "REAL"
         }
+        
+        logger.info(f"🚀 Motor de Trading (OkxWsClient) Inicializado en modo: {self.metrics['exchange_mode']}")
         
     async def fetch_historical_candles(self, limit=50):
         try:
@@ -248,46 +258,54 @@ class OkxWsClient:
             except Exception as e:
                 logger.warning(f"Error gestionando órdenes previas: {e}")
 
-            # 2. Configuración de Leverage y Cálculo de Malla
-            leverage = float(self.ai_recommendation.get('leverage', 15.0))
+            # 2. Configuración Dinámica de la Malla (Basado en IA)
+            leverage = float(self.ai_recommendation.get('leverage', 10.0))
             await self.exchange.set_leverage(leverage, self.symbol)
 
             grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
-            # Garantizar número par para división simétrica perfecta
+            
+            # Asegurar que el número de líneas sea par para mantener simetría perfecta
             if grid_lines % 2 != 0:
                 grid_lines += 1
+                
+            buy_lines = grid_lines // 2
+            sell_lines = grid_lines // 2
             
             grid_spacing_factor = float(self.ai_recommendation.get('grid_spacing_factor', 0.5)) / 100.0
+            
+            # Inversión dividida por el número de líneas total y apalancada
             effective_investment = self.base_capital * leverage
             usd_per_line = effective_investment / grid_lines
 
             await self.exchange.load_markets()
             current_price = self.metrics['last_price']
             spacing = current_price * grid_spacing_factor
+            
             market = self.exchange.market(self.symbol)
             contract_size = market.get('contractSize', 1)
 
-            # 3. Preparación del bloque único de órdenes
+            # 3. Preparación del bloque de órdenes
             orders = []
-            buy_lines = grid_lines // 2
-            sell_lines = grid_lines // 2
-            
-            logger.info(f"Grid Simétrico: {grid_lines} líneas -> {buy_lines} Buy | {sell_lines} Sell")
+            logger.info(f"Grid Dinámico: {grid_lines} líneas -> {buy_lines} Buy | {sell_lines} Sell | Leverage: x{leverage}")
 
-            # Cálculo de cantidad mínima
+            # Cálculo de cantidad (asegurando precisión del exchange y lotes mínimos)
             raw_amount = (usd_per_line / current_price) / contract_size
-            amount = max(1.0, float(self.exchange.amount_to_precision(self.symbol, raw_amount)))
+            amount = float(self.exchange.amount_to_precision(self.symbol, raw_amount))
+            amount = max(amount, float(market['limits']['amount']['min'] or 1.0))
 
-            # Llenar matriz de órdenes (Neutral: 50% compra, 50% venta)
+            # Matriz de órdenes (Symmetric Buy/Sell)
             for i in range(1, buy_lines + 1):
+                price = float(self.exchange.price_to_precision(self.symbol, current_price - (i * spacing)))
                 orders.append({
                     'symbol': self.symbol, 'type': 'limit', 'side': 'buy',
-                    'amount': amount, 'price': float(self.exchange.price_to_precision(self.symbol, current_price - (i * spacing)))
+                    'amount': amount, 'price': price
                 })
+                
             for i in range(1, sell_lines + 1):
+                price = float(self.exchange.price_to_precision(self.symbol, current_price + (i * spacing)))
                 orders.append({
                     'symbol': self.symbol, 'type': 'limit', 'side': 'sell',
-                    'amount': amount, 'price': float(self.exchange.price_to_precision(self.symbol, current_price + (i * spacing)))
+                    'amount': amount, 'price': price
                 })
 
             # 4. Envío Atómico (Batch)
