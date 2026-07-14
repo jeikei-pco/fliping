@@ -75,10 +75,13 @@ export class BalanceService {
   async getBalances(userId: string, provider: string, sandbox = true): Promise<ExchangeBalances> {
     const stored = await this.vault.getDecryptedProvider(userId, provider);
 
+    // Si tenemos credenciales guardadas, usamos su configuración de sandbox por defecto
+    const effectiveSandbox = stored ? (stored.sandbox ?? sandbox) : sandbox;
+
     if (!stored) {
       return {
         exchange: provider,
-        sandbox,
+        sandbox: effectiveSandbox,
         fetchedAt: new Date().toISOString(),
         balances: [],
         note: "Configura tus credenciales para consultar saldos reales del exchange.",
@@ -87,7 +90,7 @@ export class BalanceService {
 
     return this.exchange.fetchBalances({
       provider,
-      sandbox,
+      sandbox: effectiveSandbox,
       credentials: stored.payload,
     });
   }

@@ -189,8 +189,8 @@ async def process_job(job, job_token):
         api_key = data.get("apiKey")
         secret = data.get("secret")
         passphrase = data.get("passphrase")
-        # Forzar sandbox a True como pidió el usuario por seguridad
-        sandbox = True 
+        # Usar el valor de sandbox que viene en el job (configurado en la API)
+        sandbox = data.get("sandbox", True)
         
         if not api_key or not secret:
             logger.error("Credenciales incompletas enviadas al worker.")

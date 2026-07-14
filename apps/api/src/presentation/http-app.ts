@@ -349,7 +349,7 @@ export const createHttpApp = (services: {
               apiKey: provider.payload.apiKey,
               secret: provider.payload.secret,
               passphrase: provider.payload.passphrase,
-              sandbox: true,
+              sandbox: provider.sandbox,
             });
           }
         } else {

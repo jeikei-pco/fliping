@@ -128,13 +128,13 @@ const bootstrap = async () => {
       try {
         const provider = await vault.getDecryptedProvider(defaultUserId, "okx");
         if (provider) {
-          console.log("[Bootstrap] Motor Grid Activo: Enviando auto_start a Python...");
+          console.log(`[Bootstrap] Motor Grid Activo (Sandbox: ${provider.sandbox}): Enviando auto_start a Python...`);
           const { dispatchGridEngine } = await import("./infrastructure/workers/grid-queue.js");
           await dispatchGridEngine("auto_start", {
             apiKey: provider.payload.apiKey,
             secret: provider.payload.secret,
             passphrase: provider.payload.passphrase,
-            sandbox: true,
+            sandbox: provider.sandbox,
           });
         } else {
           console.log("[Bootstrap] Motor Grid Activo pero NO hay credenciales OKX en la Bóveda.");
