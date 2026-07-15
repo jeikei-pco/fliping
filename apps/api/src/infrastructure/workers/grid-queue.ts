@@ -42,12 +42,8 @@ export const dispatchGridEngine = async (action: "start" | "stop" | "auto_start"
 };
 
 export const dispatchGridScan = async (payload: any): Promise<any> => {
-  // Timeout depends on the amount of markets to scan. Let's give it up to 5 minutes (300000ms).
+  // 🔥 OPTIMIZACIÓN: Retorno inmediato del Job ID
   const job = await gridQueue.add("scan_markets", payload);
-  try {
-    const result = await job.waitUntilFinished(gridQueueEvents, 300000);
-    return result;
-  } catch (error: any) {
-    throw new Error(`Grid Scan Failed: ${error.message}`);
-  }
+  // No esperamos con waitUntilFinished. Devolvemos el ID de la tarea.
+  return { jobId: job.id, status: "processing" };
 };

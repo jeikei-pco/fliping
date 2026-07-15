@@ -20,16 +20,7 @@ export class PrismaOpportunityRepository implements OpportunityRepository {
     dealScore?: number;
     tags: string[];
   }): Promise<OpportunityRecord> {
-    await this.prisma.appUser.upsert({
-      where: { id: input.userId },
-      update: {},
-      create: {
-        id: input.userId,
-        displayName: input.userId === "demo-user" ? "JK Operator" : input.userId,
-        email: `${input.userId}@jk-flipping.local`,
-        passwordHash: "",
-      },
-    });
+    // User creation handled by auth flow, no need for N+1 upsert here
 
     const opportunity = await this.prisma.opportunity.create({
       data: {

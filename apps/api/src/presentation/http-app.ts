@@ -21,7 +21,12 @@ const maskValue = (value: string): string => {
   return value.slice(0, 4) + "••••••••";
 };
 
-const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-me-in-prod";
+// 🔥 SEGURIDAD: Nunca tener fallbacks de secretos en el código
+if (!process.env.JWT_SECRET) {
+  console.error("FATAL ERROR: JWT_SECRET environment variable is not defined.");
+  process.exit(1); // Detener el servidor si no hay seguridad
+}
+const JWT_SECRET = process.env.JWT_SECRET;
 
 export const createHttpApp = (services: {
   vault: CredentialVaultService;
@@ -205,7 +210,21 @@ export const createHttpApp = (services: {
 
       if (!exchange) exchange = "okx";
 
+      // 🔥 OPTIMIZACIÓN: Comprobar Caché en Redis
+      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+      const cacheKey = `balance:${userId}:${exchange}:${sandbox}`;
+      const cachedBalance = await gridRedisConnection.get(cacheKey);
+      
+      if (cachedBalance) {
+        response.json(JSON.parse(cachedBalance));
+        return;
+      }
+
       const balances = await services.balance.getBalances(userId, exchange, sandbox);
+      
+      // Guardar en caché por 30 segundos
+      await gridRedisConnection.set(cacheKey, JSON.stringify(balances), "EX", 30);
+      
       response.json(balances);
     } catch (error: any) {
       response.status(500).json({ error: error.message });
@@ -359,9 +378,31 @@ export const createHttpApp = (services: {
         exchange: config.activeExchange,
       });
 
-      response.json({ success: true, result });
+      // Retorna 202 Accepted, indicando que el proceso comenzó
+      response.status(202).json({ success: true, result });
     } catch (error: any) {
       response.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 🔥 NUEVO: Endpoint para que el Frontend consulte el estado del Job
+  app.get("/api/grid/scan/status/:jobId", async (request, response) => {
+    try {
+      const { gridQueue } = await import("../infrastructure/workers/grid-queue.js");
+      const job = await gridQueue.getJob(request.params.jobId);
+      
+      if (!job) {
+        response.status(404).json({ error: "Job no encontrado" });
+        return;
+      }
+      
+      const state = await job.getState();
+      const result = job.returnvalue;
+      const failedReason = job.failedReason;
+      
+      response.json({ id: job.id, state, result, failedReason });
+    } catch (error: any) {
+      response.status(500).json({ error: error.message });
     }
   });
 

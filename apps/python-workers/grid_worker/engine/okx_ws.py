@@ -5,6 +5,7 @@ import logging
 import pandas as pd
 from datetime import datetime
 import time
+from collections import deque
 
 from .math_core import calculate_keltner_channels, calculate_cv
 from .net_utils import patch_ccxt_resolver
@@ -198,7 +199,9 @@ class OkxWsClient:
         self.ai_recommendation = ai_recommendation or {}
         self.resume_existing_grid = resume_existing_grid
 
-        self.df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        # 🔥 OPTIMIZACIÓN: Usar deque en lugar de DataFrame para el estado en vivo
+        self.raw_candles = deque(maxlen=100)
+        self.df = pd.DataFrame()
         self.exchange = _create_exchange(exchange_id, api_key, secret, passphrase, sandbox)
             
         self.metrics = {
@@ -232,7 +235,8 @@ class OkxWsClient:
                     'close': ohlcv[4],
                     'volume': ohlcv[5]
                 })
-            self.df = pd.DataFrame(data)
+            self.raw_candles.extend(data)
+            self.df = pd.DataFrame(list(self.raw_candles))
             logger.info("Velas históricas cargadas exitosamente.")
             self.update_metrics()
         except Exception as e:
@@ -409,30 +413,55 @@ class OkxWsClient:
                     order_id = order.get('id')
                     status = order.get('status')
                     
-                    # Filtro Anti-Spam: Solo procesar órdenes cerradas que no hayamos visto
-                    if status == 'closed' and order_id not in self.processed_orders:
+                    if status == 'closed' and order_id not in getattr(self, 'processed_orders', set()):
                         self.processed_orders.add(order_id)
                         
-                        filled_price = order.get('average') or order.get('price')
+                        filled_price = float(order.get('average') or order.get('price'))
                         side = order.get('side')
-                        amount = order.get('amount')
                         
-                        logger.info(f"✅ [FILL DETECTADO] Orden {side} ejecutada a {filled_price}. Reponiendo malla...")
-                        self.ultima_ejecucion_ts = time.time()
+                        # 1. Extraemos la cantidad exacta de contratos/monedas adquiridas
+                        amount = float(order.get('filled') or order.get('amount'))
                         
-                        # LÓGICA DE GRID CONTINUO (Replenishment)
+                        # --- 🧮 CÁLCULO DE PNL Y COMISIONES (BREAKEVEN + PROFIT) ---
+                        # Comisión Maker en OKX Swap es aprox 0.02% (0.0002)
+                        maker_fee_pct = 0.0002 
+                        
+                        # Profit neto mínimo garantizado que deseas obtener (ej. 0.15%)
+                        min_net_profit_pct = 0.0015 
+                        
+                        # Movimiento porcentual total requerido para ser rentable
+                        # (Comisión al comprar) + (Comisión al vender) + (Ganancia Neta)
+                        required_movement_pct = (maker_fee_pct * 2) + min_net_profit_pct
+                        
+                        # Calculamos la distancia estricta en USD requerida desde el precio de entrada
+                        min_required_spacing_usd = filled_price * required_movement_pct
+                        
+                        # Usamos el mayor valor entre la volatilidad de Keltner y nuestro mínimo vital
+                        # Esto nos protege si Keltner llega a 0
+                        actual_spacing_usd = max(getattr(self, 'grid_spacing_usd', 0.0), min_required_spacing_usd)
+                        # -----------------------------------------------------------
+
                         if side == 'buy':
-                            # Si compramos, colocamos Take Profit (Venta) un nivel arriba
-                            new_price = filled_price + self.grid_spacing_usd
+                            # Si compramos, el Take Profit va por encima
+                            new_price = filled_price + actual_spacing_usd
                             new_side = 'sell'
                         else:
-                            # Si vendimos, colocamos Take Profit (Compra) un nivel abajo
-                            new_price = filled_price - self.grid_spacing_usd
+                            # Si vendimos, el Take Profit va por debajo
+                            new_price = filled_price - actual_spacing_usd
                             new_side = 'buy'
                             
+                        # Ajustamos a la precisión de decimales permitida por el exchange
                         new_price = float(self.exchange.price_to_precision(self.symbol, new_price))
                         
-                        params = {}
+                        logger.info(f"✅ [FILL] {side.upper()} a {filled_price} | Cantidad: {amount}")
+                        logger.info(f"📊 Spacing protector aplicado: {actual_spacing_usd:.4f} USD")
+                        logger.info(f"🎯 [TAKE PROFIT] Creando {new_side.upper()} a {new_price} (Asegura PnL Positivo)")
+                        
+                        self.ultima_ejecucion_ts = time.time()
+                        
+                        # Preparamos los parámetros forzando PostOnly para garantizar que pagamos
+                        # la comisión Maker (0.02%) y no la comisión Taker (0.05%)
+                        params = {'postOnly': True}
                         if self._exchange_id == 'okx':
                             params['tdMode'] = 'cross'
                             params['posSide'] = 'net'
@@ -440,6 +469,7 @@ class OkxWsClient:
                             params['positionSide'] = 'BOTH'
                             
                         try:
+                            # Colocamos la orden por la misma cantidad de posiciones adquiridas
                             await self.exchange.create_order(
                                 symbol=self.symbol,
                                 type='limit',
@@ -448,14 +478,14 @@ class OkxWsClient:
                                 price=new_price,
                                 params=params
                             )
-                            logger.info(f"🔄 [GRID REPLENISH] Nueva orden {new_side} colocada a {new_price}")
                         except Exception as e:
-                            logger.error(f"Error colocando orden de reposición: {e}")
+                            logger.error(f"Error colocando orden de reposición TP: {e}")
                             
             except Exception as e:
                 logger.error(f"Error en websocket (watch_orders): {e}")
                 await asyncio.sleep(5)
 
+                
     async def _watch_ohlcv_loop(self):
         logger.info(f"Iniciando escucha de Velas para {self.symbol}...")
         while self.running:
@@ -470,19 +500,20 @@ class OkxWsClient:
                         'low': ohlcv[3], 'close': ohlcv[4], 'volume': ohlcv[5]
                     }
                     
-                    if len(self.df) > 0 and self.df.iloc[-1]['timestamp'] == ts:
-                        for key in new_row:
-                            self.df.loc[self.df.index[-1], key] = new_row[key]
+                    if len(self.raw_candles) > 0 and self.raw_candles[-1]['timestamp'] == ts:
+                        # Actualizar la vela actual (mutación rápida)
+                        self.raw_candles[-1] = new_row
                     else:
-                        new_df = pd.DataFrame([new_row])
-                        self.df = pd.concat([self.df, new_df], ignore_index=True)
-                        if len(self.df) > 100:
-                            self.df = self.df.iloc[1:]
+                        # Añadir nueva vela (O(1) en deque)
+                        self.raw_candles.append(new_row)
                         is_new_candle = True
                 
+                # Sincronizar el último precio
                 self.metrics["last_price"] = float(candles[-1][4])
                 
                 if is_new_candle:
+                    # Convertir a DataFrame SÓLO cuando hay una vela cerrada para calcular Keltner
+                    self.df = pd.DataFrame(list(self.raw_candles))
                     self.update_metrics()
                     if self.evaluar_inactividad_velas(minutos=20):
                         logger.info(f"🔄 [RESPIRACIÓN VIVO] Malla re-centrada para {self.symbol}")

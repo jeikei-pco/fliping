@@ -10,7 +10,7 @@ def calculate_keltner_channels(df: pd.DataFrame, window=20, atr_window=10, multi
     if len(df) < window:
         return None, None, None
         
-    df = df.copy()
+    # df = df.copy()  # Eliminado por optimización de memoria
     
     # Calcular True Range (TR)
     df['prev_close'] = df['close'].shift(1)
