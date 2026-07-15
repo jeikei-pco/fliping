@@ -279,7 +279,7 @@ class OkxWsClient:
             raw_amount = valor_apalancado / current_price / contract_size
             amount = _normalize_amount(self.exchange.amount_to_precision(self.symbol, raw_amount))
 
-            base_params = {"tdMode": "cross", "lever": str(int(leverage))}
+            base_params = {"tdMode": "cross"}
                 
             orders = []
 
@@ -380,12 +380,10 @@ class OkxWsClient:
                         
                         logger.info(f"✅ [FILL {side.upper()} {pos_side.upper()}] Ejecutando Inversa {new_side.upper()} a {new_price} (PnL Garantizado)")
                         
-                        leverage_str = str(int(self.ai_recommendation.get('leverage', 10)))
-                        
                         if getattr(self, 'pos_mode', 'long_short_mode') == 'net_mode':
-                            params = {'postOnly': True, 'tdMode': 'cross', 'posSide': 'net', 'lever': leverage_str}
+                            params = {'postOnly': True, 'tdMode': 'cross', 'posSide': 'net'}
                         else:
-                            params = {'postOnly': True, 'tdMode': 'cross', 'posSide': pos_side, 'lever': leverage_str}
+                            params = {'postOnly': True, 'tdMode': 'cross', 'posSide': pos_side}
                             
                         try:
                             # Ejecución de la orden inversa inmediata
@@ -448,8 +446,7 @@ class OkxWsClient:
             # Construimos la estructura interna (CCXT la mapeará 1:1 al JSON de OKX)
             params = {
                 'tdMode': 'cross',
-                'posSide': pos_side,
-                'lever': '15'
+                'posSide': pos_side
             }
             
             # Log exacto de la estructura nativa que recibirá OKX en args:
@@ -460,8 +457,7 @@ class OkxWsClient:
                 "posSide": params['posSide'],
                 "ordType": "limit",
                 "sz": str(amount),
-                "px": str(target_price),
-                "lever": params['lever']
+                "px": str(target_price)
             }
             logger.info(f"⚠️ [TEST WS] Estructura exacta que se enviará al socket de OKX: {okx_raw_payload}")
             
