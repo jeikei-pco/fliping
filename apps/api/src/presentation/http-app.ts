@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
 import { z } from "zod";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import type { PrismaClient } from "@prisma/client";
 
 import {
   AlertService,
@@ -18,6 +21,8 @@ const maskValue = (value: string): string => {
   return value.slice(0, 4) + "••••••••";
 };
 
+const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-me-in-prod";
+
 export const createHttpApp = (services: {
   vault: CredentialVaultService;
   balance: BalanceService;
@@ -28,7 +33,7 @@ export const createHttpApp = (services: {
   techEngine: TechEngineService;
   realEstateEngine: RealEstateEngineService;
   saasEngine: SaasEngineService;
-  defaultUserId: string;
+  prisma: PrismaClient;
   appOrigin: string;
 }) => {
   const app = express();
@@ -47,30 +52,92 @@ export const createHttpApp = (services: {
   });
 
   // ──────────────────────────────────────────────
-  // Auth (mock)
+  // Auth
   // ──────────────────────────────────────────────
-  app.post("/api/auth/login", (request, response) => {
-    const schema = z.object({
-      email: z.string().email(),
-      password: z.string().min(4),
-    });
+  app.post("/api/auth/register", async (request, response) => {
+    try {
+      const schema = z.object({
+        email: z.string().email(),
+        password: z.string().min(6),
+        displayName: z.string().min(2),
+      });
 
-    const parsed = schema.parse(request.body);
-    response.json({
-      token: `demo-token-${parsed.email}`,
-      user: {
-        id: services.defaultUserId,
-        email: parsed.email,
-        displayName: "JK Operator",
-      },
-    });
+      const { email, password, displayName } = schema.parse(request.body);
+      
+      const existingUser = await services.prisma.appUser.findUnique({ where: { email } });
+      if (existingUser) {
+        response.status(400).json({ error: "El correo ya está en uso" });
+        return;
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+      const user = await services.prisma.appUser.create({
+        data: {
+          id: Math.random().toString(36).substring(2, 15),
+          email,
+          displayName,
+          passwordHash,
+        }
+      });
+
+      const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "7d" });
+      response.json({ token, user: { id: user.id, email: user.email, displayName: user.displayName } });
+    } catch (err: any) {
+      response.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/auth/login", async (request, response) => {
+    try {
+      const schema = z.object({
+        email: z.string().email(),
+        password: z.string(),
+      });
+
+      const { email, password } = schema.parse(request.body);
+      const user = await services.prisma.appUser.findUnique({ where: { email } });
+      if (!user) {
+        response.status(401).json({ error: "Credenciales inválidas" });
+        return;
+      }
+
+      const valid = await bcrypt.compare(password, user.passwordHash as string);
+      if (!valid) {
+        response.status(401).json({ error: "Credenciales inválidas" });
+        return;
+      }
+
+      const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "7d" });
+      response.json({ token, user: { id: user.id, email: user.email, displayName: user.displayName } });
+    } catch (err: any) {
+      response.status(400).json({ error: err.message });
+    }
+  });
+
+  app.use((request, response, next) => {
+    if (request.path.startsWith("/api/auth/") || request.path === "/api/health") {
+      return next();
+    }
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      response.status(401).json({ error: "No autorizado" });
+      return;
+    }
+    const token = authHeader.split(" ")[1];
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET) as { id: string };
+      (request as any).user = { id: decoded.id };
+      next();
+    } catch (err) {
+      response.status(401).json({ error: "Token inválido o expirado" });
+    }
   });
 
   // ──────────────────────────────────────────────
   // Credential Vault
   // ──────────────────────────────────────────────
   app.get("/api/keys", async (request, response) => {
-    const userId = String(request.query.userId ?? services.defaultUserId);
+    const userId = String((request as any).user.id);
     const credentials = await services.vault.list(userId);
     response.json({ credentials });
   });
@@ -78,7 +145,7 @@ export const createHttpApp = (services: {
   app.post("/api/keys", async (request, response) => {
     const saved = await services.vault.save({
       ...request.body,
-      userId: request.body.userId ?? services.defaultUserId,
+      userId: (request as any).user.id,
     });
 
     response.status(201).json({
@@ -92,7 +159,7 @@ export const createHttpApp = (services: {
 
   // Devuelve qué credenciales están configuradas (con valores enmascarados)
   app.get("/api/keys/status", async (request, response) => {
-    const userId = String(request.query.userId ?? services.defaultUserId);
+    const userId = String((request as any).user.id);
     const providers = ["okx", "openrouter", "firecrawl"] as const;
 
     const statuses = await Promise.all(
@@ -121,7 +188,7 @@ export const createHttpApp = (services: {
   // Balances
   // ──────────────────────────────────────────────
   app.get("/api/balances", async (request, response) => {
-    const userId = String(request.query.userId ?? services.defaultUserId);
+    const userId = String((request as any).user.id);
     const exchange = String(request.query.exchange ?? "okx");
     const sandbox = String(request.query.sandbox ?? "true") === "true";
     const balances = await services.balance.getBalances(userId, exchange, sandbox);
@@ -138,7 +205,7 @@ export const createHttpApp = (services: {
   app.post("/api/engine/toggle", async (request, response) => {
     const status = await services.cryptoEngine.toggle({
       ...request.body,
-      userId: request.body.userId ?? services.defaultUserId,
+      userId: (request as any).user.id,
     });
 
     response.json(status);
@@ -156,7 +223,7 @@ export const createHttpApp = (services: {
 
   app.post("/api/grid/start", async (request, response) => {
     try {
-      const userId = request.body.userId ?? services.defaultUserId;
+      const userId = (request as any).user.id;
       const okxCreds = await services.vault.getDecryptedProvider(userId, "okx");
       if (!okxCreds) {
         response.status(400).json({ success: false, error: "Faltan credenciales de OKX en la bóveda." });
@@ -190,7 +257,7 @@ export const createHttpApp = (services: {
     try {
       const { sandbox } = request.body as { sandbox?: boolean };
       
-      const userId = request.body.userId ?? services.defaultUserId;
+      const userId = (request as any).user.id;
       const provider = await services.vault.getDecryptedProvider(userId, "okx");
       if (!provider) {
         response.status(400).json({ success: false, error: "Credenciales de OKX no encontradas" });
@@ -253,7 +320,7 @@ export const createHttpApp = (services: {
   // Alertas (Sprint 3)
   // ──────────────────────────────────────────────
   app.get("/api/alerts", async (request, response) => {
-    const userId = String(request.query.userId ?? services.defaultUserId);
+    const userId = String((request as any).user.id);
     const motor = request.query.motor as string | undefined;
     const alerts = await services.alertService.listAlerts(
       userId,
@@ -271,7 +338,7 @@ export const createHttpApp = (services: {
   // Oportunidades (Sprint 4)
   // ──────────────────────────────────────────────
   app.get("/api/opportunities", async (request, response) => {
-    const userId = String(request.query.userId ?? services.defaultUserId);
+    const userId = String((request as any).user.id);
     const motor = request.query.motor as "real-estate" | "saas" | undefined;
     const opportunities = await services.opportunityService.listOpportunities(userId, motor);
     response.json({ opportunities });
@@ -299,7 +366,7 @@ export const createHttpApp = (services: {
   // Motores Sprints 3 & 4 — toggle y estado
   // ──────────────────────────────────────────────
     app.get("/api/engines", async (request, response) => {
-      const userId = String(request.query.userId ?? services.defaultUserId);
+      const userId = String((request as any).user.id);
       const motors = ["tech", "real-estate", "saas", "grid"] as const;
   
       const statuses = await Promise.all(
@@ -328,7 +395,7 @@ export const createHttpApp = (services: {
       });
   
       const input = schema.parse(request.body);
-      const userId = input.userId ?? services.defaultUserId;
+      const userId = input.userId ?? (request as any).user.id;
   
       let status;
   

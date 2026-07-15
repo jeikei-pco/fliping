@@ -26,7 +26,6 @@ dotenv.config();
 const port = Number(process.env.PORT ?? 4000);
 const appOrigin = process.env.APP_ORIGIN ?? "*";
 const masterKey = process.env.MASTER_KEY ?? "jk-flipping-local-master-key";
-const defaultUserId = process.env.DEFAULT_USER_ID ?? "demo-user";
 
 const prisma = getPrismaClient();
 
@@ -81,14 +80,7 @@ const saasEngine = new SaasEngineService(
 const bootstrap = async () => {
   await prisma.$connect();
 
-  // Buscar el usuario más reciente logueado/creado en el sistema
-  const latestUser = await prisma.appUser.findFirst({
-    orderBy: { updatedAt: "desc" }
-  });
-  
-  // Usar el usuario logueado en la app móvil, o caer al fallback de .env
-  const dynamicDefaultUserId = latestUser ? latestUser.id : (process.env.DEFAULT_USER_ID ?? "demo-user");
-  console.log(`[Bootstrap] Usuario principal del sistema establecido a: ${dynamicDefaultUserId}`);
+
 
   const app = createHttpApp({
     vault,
@@ -100,7 +92,7 @@ const bootstrap = async () => {
     techEngine,
     realEstateEngine,
     saasEngine,
-    defaultUserId: dynamicDefaultUserId,
+    prisma,
     appOrigin,
   });
 
@@ -130,17 +122,6 @@ const bootstrap = async () => {
 
   // Si el motor grid está activo para algún usuario, enviar credenciales
   let activeGridEngines = await prisma.engineStatus.findMany({ where: { motor: "grid", enabled: true } });
-  
-  // FALLBACK: Si no hay usuarios en DB con el grid activo, usar el dynamicDefaultUserId
-  if (activeGridEngines.length === 0) {
-    const defaultGridStatus = await prisma.engineStatus.findUnique({
-      where: { userId_motor: { userId: dynamicDefaultUserId, motor: "grid" } }
-    });
-    // Si no existe registro o si existe y está enabled, lo forzamos a iniciar (fallback)
-    if (!defaultGridStatus || defaultGridStatus.enabled) {
-      activeGridEngines = [{ userId: dynamicDefaultUserId, motor: "grid", enabled: true } as any];
-    }
-  }
 
   if (activeGridEngines.length > 0) {
     setTimeout(async () => {

@@ -145,6 +145,9 @@ export default function App() {
   const [password, setPassword] = useState("123456");
   const [userLabel, setUserLabel] = useState("JK Operator");
   const [loading, setLoading] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [displayName, setDisplayName] = useState("JK Operator");
 
   // Sprint 1 & 2
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
@@ -237,9 +240,15 @@ export default function App() {
   // ─── API helper ────────────────────────────────────────────────────────────
 
   const callApi = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
     const response = await fetch(`${apiBaseUrl}${path}`, {
       headers: {
-        "Content-Type": "application/json",
+        ...headers,
         ...(init?.headers ?? {}),
       },
       ...init,
@@ -259,11 +268,21 @@ export default function App() {
     setLoading(true);
     try {
       if (!offline) {
-        const result = await callApi<{ user: { displayName: string } }>("/api/auth/login", {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        });
-        setUserLabel(result.user.displayName);
+        if (isRegistering) {
+          const result = await callApi<{ token: string; user: { displayName: string } }>("/api/auth/register", {
+            method: "POST",
+            body: JSON.stringify({ email, password, displayName }),
+          });
+          setToken(result.token);
+          setUserLabel(result.user.displayName);
+        } else {
+          const result = await callApi<{ token: string; user: { displayName: string } }>("/api/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ email, password }),
+          });
+          setToken(result.token);
+          setUserLabel(result.user.displayName);
+        }
       }
       setScreen("dashboard");
     } catch (error) {
@@ -548,13 +567,19 @@ export default function App() {
           </Panel>
 
           <Panel>
-            <Text style={styles.sectionTitle}>Login</Text>
+            <Text style={styles.sectionTitle}>{isRegistering ? "Crear Cuenta" : "Login"}</Text>
+            {isRegistering && (
+              <Field label="Nombre (Display Name)" value={displayName} onChangeText={setDisplayName} />
+            )}
             <Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" />
             <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
             <Pressable style={styles.primaryButton} onPress={() => void handleLogin(false)}>
-              <Text style={styles.primaryButtonText}>Entrar con backend</Text>
+              <Text style={styles.primaryButtonText}>{isRegistering ? "Registrarse" : "Entrar con backend"}</Text>
             </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={() => void handleLogin(true)}>
+            <Pressable style={styles.secondaryButton} onPress={() => setIsRegistering(!isRegistering)}>
+              <Text style={styles.secondaryButtonText}>{isRegistering ? "¿Ya tienes cuenta? Inicia sesión" : "¿No tienes cuenta? Regístrate"}</Text>
+            </Pressable>
+            <Pressable style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => void handleLogin(true)}>
               <Text style={styles.secondaryButtonText}>Entrar en demo local</Text>
             </Pressable>
           </Panel>
