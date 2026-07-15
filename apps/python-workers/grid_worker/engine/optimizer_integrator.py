@@ -43,11 +43,11 @@ def optimize_grid_params(ai_params, screener_data):
     # 5. Frecuencia de Recálculo (Minutos)
     # Si el par es muy errático (alta desviación), recalculamos la malla más rápido
     if std_dev > 0.5:
-        recalc_minutes = 60   # Cada hora (12 velas de 5m)
+        recalc_minutes = 60   # Cada hora (4 velas de 15m)
     elif std_dev > 0.2:
-        recalc_minutes = 120  # Cada 2 horas (24 velas de 5m)
+        recalc_minutes = 120  # Cada 2 horas (8 velas de 15m)
     else:
-        recalc_minutes = 240  # Cada 4 horas (48 velas de 5m)
+        recalc_minutes = 240  # Cada 4 horas (16 velas de 15m)
         
     return {
         "grid_spacing_factor": grid_spacing,

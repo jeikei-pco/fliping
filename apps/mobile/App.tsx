@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -766,9 +767,11 @@ export default function App() {
                       </View>
                       <Text style={styles.cardMeta}>{alert.description}</Text>
                       {alert.sourceUrl ? (
-                        <Text style={[styles.helper, { color: colors.accent }]} numberOfLines={1}>
-                          {alert.sourceUrl}
-                        </Text>
+                        <Pressable onPress={() => Linking.openURL(alert.sourceUrl as string).catch(() => {})}>
+                          <Text style={[styles.helper, { color: colors.accent, textDecorationLine: 'underline' }]} numberOfLines={1}>
+                            {alert.sourceUrl}
+                          </Text>
+                        </Pressable>
                       ) : null}
                       <Text style={styles.helper}>{new Date(alert.createdAt).toLocaleString()}</Text>
                     </View>
@@ -1135,7 +1138,6 @@ export default function App() {
               </Panel>
             </>
           )}
-          )}
         </ScrollView>
       )}
 
@@ -1219,7 +1221,9 @@ export default function App() {
                   {selectedOpportunity.sourceUrl ? (
                     <View style={styles.infoBlock}>
                       <Text style={styles.infoLabel}>🔗 Fuente</Text>
-                      <Text style={[styles.helper, { color: colors.accent }]}>{selectedOpportunity.sourceUrl}</Text>
+                      <Pressable onPress={() => Linking.openURL(selectedOpportunity.sourceUrl as string).catch(() => {})}>
+                        <Text style={[styles.helper, { color: colors.accent, textDecorationLine: 'underline' }]}>{selectedOpportunity.sourceUrl}</Text>
+                      </Pressable>
                     </View>
                   ) : null}
 

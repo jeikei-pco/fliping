@@ -12,6 +12,7 @@ export class PrismaOpportunityRepository {
                 id: input.userId,
                 displayName: input.userId === "demo-user" ? "JK Operator" : input.userId,
                 email: `${input.userId}@jk-flipping.local`,
+                passwordHash: "",
             },
         });
         const opportunity = await this.prisma.opportunity.create({

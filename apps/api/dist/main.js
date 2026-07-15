@@ -16,7 +16,6 @@ dotenv.config();
 const port = Number(process.env.PORT ?? 4000);
 const appOrigin = process.env.APP_ORIGIN ?? "*";
 const masterKey = process.env.MASTER_KEY ?? "jk-flipping-local-master-key";
-const defaultUserId = process.env.DEFAULT_USER_ID ?? "demo-user";
 const prisma = getPrismaClient();
 // ── Repositorios ────────────────────────────────────────────────────────
 const credentialRepository = new PrismaCredentialRepository(prisma);
@@ -40,43 +39,80 @@ const engineManager = new EngineManagerService(engineStatusRepository);
 const techEngine = new TechEngineService(vault, scraper, llm, alertRepository, engineStatusRepository);
 const realEstateEngine = new RealEstateEngineService(vault, scraper, llm, opportunityRepository, engineStatusRepository);
 const saasEngine = new SaasEngineService(vault, scraper, llm, opportunityRepository, engineStatusRepository);
-// ── HTTP App ─────────────────────────────────────────────────────────────
-const app = createHttpApp({
-    vault,
-    balance,
-    cryptoEngine,
-    alertService,
-    opportunityService,
-    engineManager,
-    techEngine,
-    realEstateEngine,
-    saasEngine,
-    defaultUserId,
-    appOrigin,
-});
 // ── Bootstrap ─────────────────────────────────────────────────────────────
 const bootstrap = async () => {
     await prisma.$connect();
+    const app = createHttpApp({
+        vault,
+        balance,
+        cryptoEngine,
+        alertService,
+        opportunityService,
+        engineManager,
+        techEngine,
+        realEstateEngine,
+        saasEngine,
+        prisma,
+        appOrigin,
+    });
     // Restaurar motores que estaban activos al momento del reinicio del servidor
-    const motors = ["tech", "real-estate", "saas"];
-    for (const motor of motors) {
-        const storedStatus = await engineStatusRepository.findByUserAndMotor(defaultUserId, motor);
-        if (storedStatus?.enabled) {
-            console.log(`[Bootstrap] Restaurando Motor ${motor} para usuario ${defaultUserId}...`);
-            if (motor === "tech") {
-                void techEngine.toggle({ userId: defaultUserId, enabled: true });
-            }
-            else if (motor === "real-estate") {
-                void realEstateEngine.toggle({ userId: defaultUserId, enabled: true });
-            }
-            else {
-                void saasEngine.toggle({ userId: defaultUserId, enabled: true });
-            }
-        }
+    console.log(`[Bootstrap] Buscando motores activos en la base de datos...`);
+    const activeTechEngines = await prisma.engineStatus.findMany({ where: { motor: "tech", enabled: true } });
+    for (const status of activeTechEngines) {
+        console.log(`[Bootstrap] Restaurando Motor tech para usuario ${status.userId}...`);
+        void techEngine.toggle({ userId: status.userId, enabled: true });
     }
-    app.listen(port, () => {
-        console.log(`JK-Flipping API escuchando en http://localhost:${port}`);
+    const activeSaasEngines = await prisma.engineStatus.findMany({ where: { motor: "saas", enabled: true } });
+    for (const status of activeSaasEngines) {
+        console.log(`[Bootstrap] Restaurando Motor saas para usuario ${status.userId}...`);
+        void saasEngine.toggle({ userId: status.userId, enabled: true });
+    }
+    const activeRealEstateEngines = await prisma.engineStatus.findMany({ where: { motor: "real-estate", enabled: true } });
+    for (const status of activeRealEstateEngines) {
+        console.log(`[Bootstrap] Restaurando Motor inmobiliario para usuario ${status.userId}...`);
+        void realEstateEngine.toggle({ userId: status.userId, enabled: true });
+    }
+    const { spawnPythonWorker, stopPythonWorker } = await import("./infrastructure/workers/python-spawner.js");
+    spawnPythonWorker();
+    // Si el motor grid está activo para algún usuario, enviar credenciales
+    let activeGridEngines = await prisma.engineStatus.findMany({ where: { motor: "grid", enabled: true } });
+    if (activeGridEngines.length > 0) {
+        setTimeout(async () => {
+            for (const status of activeGridEngines) {
+                try {
+                    const provider = await vault.getDecryptedProvider(status.userId, "okx");
+                    if (provider) {
+                        console.log(`[Bootstrap] Motor Grid Activo para ${status.userId} (Sandbox: ${provider.sandbox}): Enviando auto_start...`);
+                        const { dispatchGridEngine } = await import("./infrastructure/workers/grid-queue.js");
+                        await dispatchGridEngine("auto_start", {
+                            apiKey: provider.payload.apiKey,
+                            secret: provider.payload.secret,
+                            passphrase: provider.payload.passphrase,
+                            sandbox: provider.sandbox,
+                        });
+                    }
+                    else {
+                        console.log(`[Bootstrap] Motor Grid Activo para ${status.userId} pero NO hay credenciales OKX en la Bóveda.`);
+                    }
+                }
+                catch (err) {
+                    console.error(`[Bootstrap] Error enviando auto_start para ${status.userId}:`, err);
+                }
+            }
+        }, 3000); // Dar 3 segundos para que Python levante BullMQ
+    }
+    const server = app.listen(port, '::', () => {
+        console.log(`JK-Flipping API escuchando en http://[::]:${port}`);
         console.log(`  Sprints 3 & 4 activados: Motor Tech, Inmobiliario, Micro-SaaS`);
+        console.log(`  Worker de Python: Gestionado por Node`);
+    });
+    process.on("SIGTERM", () => {
+        stopPythonWorker();
+        server.close();
+    });
+    process.on("SIGINT", () => {
+        stopPythonWorker();
+        server.close();
     });
 };
 void bootstrap();

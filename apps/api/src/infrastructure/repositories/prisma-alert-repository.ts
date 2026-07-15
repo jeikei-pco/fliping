@@ -23,6 +23,7 @@ export class PrismaAlertRepository implements AlertRepository {
         id: input.userId,
         displayName: input.userId === "demo-user" ? "JK Operator" : input.userId,
         email: `${input.userId}@jk-flipping.local`,
+        passwordHash: "",
       },
     });
 

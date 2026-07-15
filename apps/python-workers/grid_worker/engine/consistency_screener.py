@@ -9,7 +9,7 @@ from .net_utils import patch_ccxt_resolver
 logger = logging.getLogger("GridWorker.Screener")
 
 
-async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbox=True, timeframe="5m", limit=288):
+async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbox=True, timeframe="15m", limit=288):
     """
     Escanea todos los mercados Swap USDT en el exchange especificado DIRECTAMENTE DESDE EL EXCHANGE.
     limit=288 representa 24 horas en velas de 5 minutos.
@@ -75,7 +75,7 @@ async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbo
         await exchange.close()
 
 
-async def fetch_and_calculate_cv(exchange, symbol, timeframe="5m", limit=288):
+async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=288):
     try:
         # 1. Obtener límites de OKX para validación nominal
         market = exchange.markets.get(symbol, {})
@@ -111,7 +111,7 @@ async def fetch_and_calculate_cv(exchange, symbol, timeframe="5m", limit=288):
         # Calidad: Qué tanto del rango total es cuerpo (evita mechazos)
         df['quality'] = np.where(df['range_pct'] > 0, df['body_pct'] / df['range_pct'], 0)
         
-        # 3. Contexto Direccional (EMAs rápidas para 5m)
+        # 3. Contexto Direccional (EMAs rápidas para 15m)
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
         

@@ -11,24 +11,15 @@ export class PrismaEngineStatusRepository {
         return record ? this.mapRecord(record) : null;
     }
     async save(input) {
-        await this.prisma.appUser.upsert({
-            where: { id: input.userId },
-            update: {},
-            create: {
-                id: input.userId,
-                displayName: input.userId === "demo-user" ? "JK Operator" : input.userId,
-                email: `${input.userId}@jk-flipping.local`,
-            },
-        });
         const record = await this.prisma.engineStatus.upsert({
             where: { userId_motor: { userId: input.userId, motor: input.motor } },
             update: {
                 enabled: input.enabled,
                 startedAt: input.startedAt ? new Date(input.startedAt) : undefined,
                 lastRunAt: input.lastRunAt ? new Date(input.lastRunAt) : undefined,
-                lastResult: input.lastResult ?? null,
-                lastError: input.lastError ?? null,
-                config: input.config ?? null,
+                lastResult: input.lastResult !== undefined ? input.lastResult : undefined,
+                lastError: input.lastError !== undefined ? input.lastError : undefined,
+                config: input.config !== undefined ? input.config : undefined,
             },
             create: {
                 id: randomUUID(),

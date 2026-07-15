@@ -12,7 +12,7 @@ async def run_vectorized_backtest(exchange_id, api_key, secret, passphrase, symb
     Lógica estricta: Entry -> Crea TP -> Toca TP -> Crea Entry.
     """
     from .okx_ws import _create_exchange
-    logger.info(f"Iniciando Backtest en {len(symbols)} símbolos (Velas 5m)...")
+    logger.info(f"Iniciando Backtest en {len(symbols)} símbolos (Velas 15m)...")
     
     exchange = _create_exchange(exchange_id, api_key, secret, passphrase, sandbox)
         
@@ -31,8 +31,8 @@ async def run_vectorized_backtest(exchange_id, api_key, secret, passphrase, symb
                 taker_fee = float(market.get('taker', 0.0005))
                 fee_pct = taker_fee * 2 # Compra + Venta
                 
-                # 2. Descargar Velas (8 horas = 96 velas de 5m)
-                ohlcvs = await exchange.fetch_ohlcv(symbol, '5m', limit=96)
+                # 2. Descargar Velas (24 horas = 96 velas de 15m)
+                ohlcvs = await exchange.fetch_ohlcv(symbol, '15m', limit=96)
                 if not ohlcvs or len(ohlcvs) < 10:
                     continue
                     

@@ -44,8 +44,8 @@ export class CredentialVaultService {
             updatedAt: record.updatedAt,
         }));
     }
-    async getDecryptedProvider(userId, provider) {
-        const record = await this.repository.findByProvider(userId, provider);
+    async getDecryptedProvider(userId, provider, sandbox) {
+        const record = await this.repository.findByProvider(userId, provider, sandbox);
         if (!record) {
             return null;
         }
@@ -65,10 +65,12 @@ export class BalanceService {
     }
     async getBalances(userId, provider, sandbox = true) {
         const stored = await this.vault.getDecryptedProvider(userId, provider);
+        // Si tenemos credenciales guardadas, usamos su configuración de sandbox por defecto
+        const effectiveSandbox = stored ? (stored.sandbox ?? sandbox) : sandbox;
         if (!stored) {
             return {
                 exchange: provider,
-                sandbox,
+                sandbox: effectiveSandbox,
                 fetchedAt: new Date().toISOString(),
                 balances: [],
                 note: "Configura tus credenciales para consultar saldos reales del exchange.",
@@ -76,7 +78,7 @@ export class BalanceService {
         }
         return this.exchange.fetchBalances({
             provider,
-            sandbox,
+            sandbox: effectiveSandbox,
             credentials: stored.payload,
         });
     }

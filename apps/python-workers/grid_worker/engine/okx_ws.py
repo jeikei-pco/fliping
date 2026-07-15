@@ -179,7 +179,7 @@ class OkxWsClient:
         passphrase,
         sandbox=True,
         symbol="BTC/USDT",
-        timeframe="5m",
+        timeframe="15m",
         base_capital=50.0,
         ai_recommendation=None,
         resume_existing_grid=False,
@@ -323,7 +323,17 @@ class OkxWsClient:
             # Calculamos la cantidad de contratos/monedas usando el valor apalancado
             raw_amount = (valor_orden_apalancada / current_price) / contract_size
             amount = float(self.exchange.amount_to_precision(self.symbol, raw_amount))
-            amount = max(amount, float(market['limits']['amount']['min'] or 1.0))
+            
+            # Verificamos si el apalancamiento + capital alcanzan para el mínimo del exchange
+            min_amount = float(market['limits']['amount']['min'] or 1.0)
+            if amount < min_amount:
+                logger.error(
+                    f"⛔ [ERROR CRÍTICO] El valor asignado por orden ({valor_orden_apalancada:.2f} USDT) "
+                    f"no alcanza para el mínimo requerido de {min_amount} contratos en {self.symbol}. "
+                    f"Prueba aumentando el capital, el apalancamiento, o usando un activo más barato."
+                )
+                # Detenemos la ejecución de este ciclo para proteger tu cuenta
+                return
 
             base_params = {}
             if self._exchange_id == 'okx':

@@ -102,7 +102,7 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                 if not engine_instance or not engine_instance.running:
                     engine_instance = OkxWsClient(
                         exchange_id, api_key, secret, passphrase, sandbox, 
-                        symbol=active_symbol, timeframe="5m", base_capital=base_capital, resume_existing_grid=True
+                        symbol=active_symbol, timeframe="15m", base_capital=base_capital, resume_existing_grid=True
                     )
                     asyncio.create_task(engine_instance.start())
                 
@@ -159,7 +159,7 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                             logger.info(f"Iniciando Grid en el ganador: {winner['symbol']}")
                             engine_instance = OkxWsClient(
                                 exchange_id, api_key, secret, passphrase, sandbox,
-                                symbol=winner['symbol'], timeframe="5m", base_capital=base_capital,
+                                symbol=winner['symbol'], timeframe="15m", base_capital=base_capital,
                                 ai_recommendation=ai_recommendation, resume_existing_grid=False
                             )
                             asyncio.create_task(engine_instance.start())

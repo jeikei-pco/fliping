@@ -405,6 +405,8 @@ Para cada propiedad interesante:
 2. Busca palabras clave de vendedores motivados: "urge vender", "motivated seller", "as-is", "fixer-upper", "cash only", "price reduced"
 3. Asigna un dealScore del 1 al 10 (10 = oportunidad excepcional)
 
+CRÍTICO: NO inventes ni simules propiedades. Si el contenido no muestra propiedades reales en venta, debes devolver "opportunityFound": false y dejar los demás campos vacíos o nulos. Es inaceptable devolver datos falsos, moks o simulados.
+
 Responde con este JSON exacto para la MEJOR oportunidad encontrada:
 {
   "opportunityFound": boolean,
@@ -576,6 +578,8 @@ Criterios de evaluación:
 4. Potencial de crecimiento técnico (sin marketing agresivo)
 5. Señales de subvaluación (fundador cansado, negocio descuidado, etc.)
 
+CRÍTICO: NO inventes ni simules negocios. Si el contenido no muestra listados reales en venta, debes devolver "opportunityFound": false y dejar los demás campos vacíos o nulos. Es inaceptable devolver datos falsos, moks o simulados.
+
 Responde con este JSON exacto para la MEJOR oportunidad encontrada:
 {
   "opportunityFound": boolean,
@@ -611,7 +615,7 @@ ${pageContent.slice(0, 5000)}
           userId,
           motor: "saas",
           title: analysis.title,
-          description: `${analysis.description}\n\nStack: ${(analysis.techStack ?? []).join(", ")}\nPotencial: ${analysis.growthPotential}`,
+          description: `${analysis.description}\n\nIngresos: ${analysis.monthlyRevenue} / mes (${analysis.annualRevenue} / año)\nMúltiplo: ${analysis.revenueMultiple}\n\nStack: ${(analysis.techStack ?? []).join(", ")}\nPotencial: ${analysis.growthPotential}`,
           sourceUrl: analysis.sourceUrl ?? cfg.targetUrl,
           aiAnalysis: analysis.analysis,
           estimatedValue: analysis.askingPrice,

@@ -49,13 +49,29 @@ export class EngineManagerService {
         return this.repository.findByUserAndMotor(userId, motor);
     }
     async setEnabled(userId, motor, enabled) {
+        return this.repository.save({ userId, motor, enabled });
+    }
+    async setConfig(userId, motor, config) {
+        const current = await this.getStatus(userId, motor);
         return this.repository.save({
             userId,
             motor,
-            enabled,
-            startedAt: enabled ? new Date().toISOString() : undefined,
+            enabled: current ? current.enabled : false,
+            config
         });
     }
+}
+function parseJsonFromLLM(content) {
+    try {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+        }
+    }
+    catch {
+        // Ignorar error de parsing
+    }
+    return null;
 }
 export class TechEngineService {
     vault;
@@ -93,7 +109,6 @@ export class TechEngineService {
             startedAt: new Date().toISOString(),
             config: JSON.stringify(cfg),
         });
-        // Ejecutar inmediatamente y luego en intervalos
         void this.runScan(params.userId, cfg);
         this.clearTimer();
         this.timer = setInterval(() => {
@@ -106,7 +121,6 @@ export class TechEngineService {
     }
     async runScan(userId, cfg) {
         try {
-            // Obtener API keys de la bóveda
             const firecrawlCred = await this.vault.getDecryptedProvider(userId, "firecrawl");
             const openrouterCred = await this.vault.getDecryptedProvider(userId, "openrouter");
             if (!firecrawlCred?.payload?.apiKey || !openrouterCred?.payload?.apiKey) {
@@ -119,7 +133,6 @@ export class TechEngineService {
                 });
                 return;
             }
-            // Scraping de la página de hardware
             const pages = await this.scraper.crawl({
                 url: cfg.targetUrl,
                 apiKey: firecrawlCred.payload.apiKey,
@@ -136,7 +149,6 @@ export class TechEngineService {
                 });
                 return;
             }
-            // Análisis con IA rápida (Groq via OpenRouter)
             const llmResponse = await this.llm.chat({
                 apiKey: openrouterCred.payload.apiKey,
                 model: "groq/llama-3.3-70b-versatile",
@@ -168,16 +180,7 @@ ${pageContent.slice(0, 4000)}
                 ],
                 temperature: 0.1,
             });
-            let analysis = null;
-            try {
-                const jsonMatch = llmResponse.content.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    analysis = JSON.parse(jsonMatch[0]);
-                }
-            }
-            catch {
-                // Si el parsing falla, ignoramos silenciosamente
-            }
+            const analysis = parseJsonFromLLM(llmResponse.content);
             const now = new Date().toISOString();
             if (analysis?.isGoodDeal && analysis.productFound) {
                 await this.alertRepo.create({
@@ -195,7 +198,6 @@ ${pageContent.slice(0, 4000)}
                 enabled: true,
                 lastRunAt: now,
                 lastResult: JSON.stringify(analysis),
-                lastError: null,
             });
         }
         catch (error) {
@@ -321,16 +323,7 @@ ${pageContent.slice(0, 5000)}
                 ],
                 temperature: 0.2,
             });
-            let analysis = null;
-            try {
-                const jsonMatch = llmResponse.content.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    analysis = JSON.parse(jsonMatch[0]);
-                }
-            }
-            catch {
-                // parsing fail silencioso
-            }
+            const analysis = parseJsonFromLLM(llmResponse.content);
             if (analysis?.opportunityFound && (analysis.dealScore ?? 0) >= 5) {
                 await this.opportunityRepo.create({
                     userId,
@@ -351,7 +344,6 @@ ${pageContent.slice(0, 5000)}
                 enabled: true,
                 lastRunAt: new Date().toISOString(),
                 lastResult: JSON.stringify({ dealScore: analysis?.dealScore, opportunityFound: analysis?.opportunityFound }),
-                lastError: null,
             });
         }
         catch (error) {
@@ -473,7 +465,7 @@ Responde con este JSON exacto para la MEJOR oportunidad encontrada:
   "sourceUrl": string | null
 }
 
-dealScore del 1-10 donde 10 = oportunidad excepcional. Incluir solo si dealScore >= 6.
+dealScore del 1-10 donde 10 = oportunidad excepcional.
 
 Contenido del marketplace:
 ---
@@ -483,16 +475,7 @@ ${pageContent.slice(0, 5000)}
                 ],
                 temperature: 0.2,
             });
-            let analysis = null;
-            try {
-                const jsonMatch = llmResponse.content.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    analysis = JSON.parse(jsonMatch[0]);
-                }
-            }
-            catch {
-                // parsing fail silencioso
-            }
+            const analysis = parseJsonFromLLM(llmResponse.content);
             if (analysis?.opportunityFound && (analysis.dealScore ?? 0) >= 6) {
                 await this.opportunityRepo.create({
                     userId,
@@ -512,7 +495,6 @@ ${pageContent.slice(0, 5000)}
                 enabled: true,
                 lastRunAt: new Date().toISOString(),
                 lastResult: JSON.stringify({ dealScore: analysis?.dealScore, opportunityFound: analysis?.opportunityFound }),
-                lastError: null,
             });
         }
         catch (error) {

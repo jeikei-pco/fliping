@@ -1,4 +1,7 @@
 import ccxt from "ccxt";
+import dns from "node:dns";
+// Forzar el uso de IPv4 primero a nivel global en Node.js para evitar bloqueos por IPv6
+dns.setDefaultResultOrder("ipv4first");
 export class CcxtExchangeService {
     async fetchBalances(params) {
         if (!params.credentials?.apiKey || !params.credentials.secret) {

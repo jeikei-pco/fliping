@@ -1,5 +1,5 @@
-import { getPrismaClient } from "./infrastructure/services/prisma-client-service";
-import { AesEncryptionService } from "./infrastructure/services/aes-encryption-service";
+import { getPrismaClient } from "./infrastructure/services/prisma-client-service.js";
+import { AesEncryptionService } from "./infrastructure/services/aes-encryption-service.js";
 import { spawn } from "child_process";
 import * as path from "path";
 

@@ -5,25 +5,12 @@ export class PrismaCredentialRepository {
         this.prisma = prisma;
     }
     async save(input, encryptedPayload) {
-        await this.prisma.appUser.upsert({
-            where: {
-                id: input.userId,
-            },
-            update: {
-                displayName: this.inferDisplayName(input.userId),
-                email: this.inferEmail(input.userId),
-            },
-            create: {
-                id: input.userId,
-                displayName: this.inferDisplayName(input.userId),
-                email: this.inferEmail(input.userId),
-            },
-        });
         const credential = await this.prisma.credential.upsert({
             where: {
-                userId_provider: {
+                userId_provider_sandbox: {
                     userId: input.userId,
                     provider: input.provider,
+                    sandbox: input.sandbox ?? false,
                 },
             },
             update: {
@@ -53,14 +40,25 @@ export class PrismaCredentialRepository {
         });
         return credentials.map((credential) => this.mapCredential(credential));
     }
-    async findByProvider(userId, provider) {
-        const credential = await this.prisma.credential.findUnique({
-            where: {
-                userId_provider: {
-                    userId,
-                    provider,
+    async findByProvider(userId, provider, sandbox) {
+        if (sandbox !== undefined) {
+            const credential = await this.prisma.credential.findUnique({
+                where: {
+                    userId_provider_sandbox: {
+                        userId,
+                        provider,
+                        sandbox,
+                    },
                 },
+            });
+            return credential ? this.mapCredential(credential) : null;
+        }
+        const credential = await this.prisma.credential.findFirst({
+            where: {
+                userId,
+                provider,
             },
+            orderBy: { updatedAt: "desc" },
         });
         return credential ? this.mapCredential(credential) : null;
     }
