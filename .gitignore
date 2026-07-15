@@ -3,3 +3,6 @@ apps/mobile/.expo
 apps/*/dist
 apps/python-workers/grid_worker/.venv
 node_modules
+
+apps\python-workers\grid_worker\tests\.env
+.env
