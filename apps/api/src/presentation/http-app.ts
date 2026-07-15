@@ -115,7 +115,7 @@ export const createHttpApp = (services: {
   });
 
   app.use((request, response, next) => {
-    if (request.path.startsWith("/api/auth/") || request.path === "/api/health") {
+    if (request.path.startsWith("/api/auth/") || request.path.startsWith("/api/internal/") || request.path === "/api/health") {
       return next();
     }
     const authHeader = request.headers.authorization;
@@ -188,16 +188,95 @@ export const createHttpApp = (services: {
   // Balances
   // ──────────────────────────────────────────────
   app.get("/api/balances", async (request, response) => {
-    const userId = String((request as any).user.id);
-    const exchange = String(request.query.exchange ?? "okx");
-    const sandbox = String(request.query.sandbox ?? "true") === "true";
-    const balances = await services.balance.getBalances(userId, exchange, sandbox);
-    response.json(balances);
+    try {
+      const userId = String((request as any).user.id);
+      
+      let exchange = request.query.exchange as string | undefined;
+      let sandbox: boolean | undefined = undefined;
+
+      if (!exchange) {
+        const record = await services.engineManager.getStatus(userId, "grid");
+        const config = record?.config ? JSON.parse(record.config) : { activeExchange: "okx", useSandbox: true };
+        exchange = config.activeExchange;
+        sandbox = config.useSandbox;
+      } else {
+        sandbox = String(request.query.sandbox ?? "true") === "true";
+      }
+
+      if (!exchange) exchange = "okx";
+
+      const balances = await services.balance.getBalances(userId, exchange, sandbox);
+      response.json(balances);
+    } catch (error: any) {
+      response.status(500).json({ error: error.message });
+    }
   });
 
   // ──────────────────────────────────────────────
   // Motor Cripto (Sprint 2) / Grid Worker (Sprint 1)
   // 
+  app.get("/api/engine/config", async (request, response) => {
+    try {
+      const userId = String((request as any).user.id);
+      const record = await services.engineManager.getStatus(userId, "grid");
+      if (record?.config) {
+        response.json(JSON.parse(record.config));
+      } else {
+        response.json({ activeExchange: "okx", useSandbox: true });
+      }
+    } catch (error: any) {
+      response.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/engine/config", async (request, response) => {
+    try {
+      const userId = String((request as any).user.id);
+      const schema = z.object({
+        activeExchange: z.string(),
+        useSandbox: z.boolean()
+      });
+      const config = schema.parse(request.body);
+      
+      await services.engineManager.setConfig(userId, "grid", JSON.stringify(config));
+      response.json({ success: true, config });
+    } catch (error: any) {
+      response.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/internal/worker-config", async (request, response) => {
+    try {
+      const userId = request.query.userId as string;
+      if (!userId) {
+        response.status(400).json({ error: "userId is required" });
+        return;
+      }
+
+      const record = await services.engineManager.getStatus(userId, "grid");
+      const config = record?.config ? JSON.parse(record.config) : { activeExchange: "okx", useSandbox: true };
+      
+      const provider = await services.vault.getDecryptedProvider(userId, config.activeExchange, config.useSandbox);
+      
+      if (!provider) {
+        response.status(404).json({ error: "Credenciales no encontradas para la configuración activa" });
+        return;
+      }
+
+      response.json({
+        exchange: config.activeExchange,
+        sandbox: config.useSandbox,
+        credentials: {
+          apiKey: provider.payload.apiKey,
+          secret: provider.payload.secret,
+          passphrase: provider.payload.passphrase
+        }
+      });
+    } catch (error: any) {
+      response.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/engine/status", (_request, response) => {
     response.json(services.cryptoEngine.getStatus());
   });
@@ -224,18 +303,22 @@ export const createHttpApp = (services: {
   app.post("/api/grid/start", async (request, response) => {
     try {
       const userId = (request as any).user.id;
-      const okxCreds = await services.vault.getDecryptedProvider(userId, "okx");
-      if (!okxCreds) {
-        response.status(400).json({ success: false, error: "Faltan credenciales de OKX en la bóveda." });
+      const record = await services.engineManager.getStatus(userId, "grid");
+      const config = record?.config ? JSON.parse(record.config) : { activeExchange: "okx", useSandbox: true };
+      
+      const providerCreds = await services.vault.getDecryptedProvider(userId, config.activeExchange, config.useSandbox);
+      if (!providerCreds) {
+        response.status(400).json({ success: false, error: `Faltan credenciales de ${config.activeExchange} en la bóveda.` });
         return;
       }
       
       const { dispatchGridEngine } = await import("../infrastructure/workers/grid-queue.js");
       const result = await dispatchGridEngine("start", { 
-        apiKey: okxCreds.payload.apiKey,
-        secret: okxCreds.payload.secret,
-        passphrase: okxCreds.payload.passphrase,
-        sandbox: okxCreds.sandbox
+        apiKey: providerCreds.payload.apiKey,
+        secret: providerCreds.payload.secret,
+        passphrase: providerCreds.payload.passphrase,
+        sandbox: providerCreds.sandbox,
+        exchange: config.activeExchange
       });
       response.json({ success: true, result });
     } catch (error: any) {
@@ -258,9 +341,12 @@ export const createHttpApp = (services: {
       const { sandbox } = request.body as { sandbox?: boolean };
       
       const userId = (request as any).user.id;
-      const provider = await services.vault.getDecryptedProvider(userId, "okx");
+      const record = await services.engineManager.getStatus(userId, "grid");
+      const config = record?.config ? JSON.parse(record.config) : { activeExchange: "okx", useSandbox: true };
+      
+      const provider = await services.vault.getDecryptedProvider(userId, config.activeExchange, sandbox ?? config.useSandbox);
       if (!provider) {
-        response.status(400).json({ success: false, error: "Credenciales de OKX no encontradas" });
+        response.status(400).json({ success: false, error: `Credenciales de ${config.activeExchange} no encontradas` });
         return;
       }
 
@@ -269,7 +355,8 @@ export const createHttpApp = (services: {
         apiKey: provider.payload.apiKey,
         secret: provider.payload.secret,
         passphrase: provider.payload.passphrase,
-        sandbox: sandbox ?? true,
+        sandbox: sandbox ?? config.useSandbox,
+        exchange: config.activeExchange,
       });
 
       response.json({ success: true, result });
@@ -410,13 +497,17 @@ export const createHttpApp = (services: {
 
         const { dispatchGridEngine } = await import("../infrastructure/workers/grid-queue.js");
         if (input.enabled) {
-          const provider = await services.vault.getDecryptedProvider(userId, "okx");
+          const record = await services.engineManager.getStatus(userId, "grid");
+          const config = record?.config ? JSON.parse(record.config) : { activeExchange: "okx", useSandbox: true };
+          const provider = await services.vault.getDecryptedProvider(userId, config.activeExchange, config.useSandbox);
+          
           if (provider) {
             await dispatchGridEngine("auto_start", {
               apiKey: provider.payload.apiKey,
               secret: provider.payload.secret,
               passphrase: provider.payload.passphrase,
               sandbox: provider.sandbox,
+              exchange: config.activeExchange,
             });
           }
         } else {

@@ -1,6 +1,7 @@
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
+import numpy as np
 import logging
 from .math_core import calculate_cv
 from .net_utils import patch_ccxt_resolver
@@ -8,36 +9,20 @@ from .net_utils import patch_ccxt_resolver
 logger = logging.getLogger("GridWorker.Screener")
 
 
-async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timeframe="5m", limit=288):
+async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbox=True, timeframe="5m", limit=288):
     """
-    Escanea todos los mercados Swap USDT en OKX DIRECTAMENTE DESDE EL EXCHANGE.
+    Escanea todos los mercados Swap USDT en el exchange especificado DIRECTAMENTE DESDE EL EXCHANGE.
     limit=288 representa 24 horas en velas de 5 minutos.
-    Devuelve el Top 20 de símbolos con menor CV (más constantes) o mejor amplitud.
+    Devuelve los símbolos ordenados por el Score de Promesa (Tamaño, Calidad y Predictibilidad).
     """
+    from .okx_ws import _create_exchange
     modo_str = "DEMO/SANDBOX" if sandbox else "REAL"
-    logger.info(f"Iniciando Screener Global en modo {modo_str}...")
+    logger.info(f"Iniciando Screener Global en {exchange_id} (Modo {modo_str})...")
     
-    exchange = ccxt.okx({
-        'apiKey': api_key,
-        'secret': secret,
-        'password': passphrase,
-        'enableRateLimit': True,
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        'options': {
-            'defaultType': 'swap',
-            'fetchMarkets': ['swap']
-        }
-    })
-    
-    if sandbox:
-        exchange.set_sandbox_mode(True)
-    
-    patch_ccxt_resolver(exchange)
+    exchange = _create_exchange(exchange_id, api_key, secret, passphrase, sandbox)
         
     try:
-        # 1. SIEMPRE DESCARGAR DESDE EL EXCHANGE (Ignora cualquier caché/DB)
+        # 1. SIEMPRE DESCARGAR DESDE EL EXCHANGE
         try:
             await exchange.load_markets()
         except Exception as e:
@@ -51,14 +36,13 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
             is_active = market.get('active') == True
             is_usdt_settled = market.get('settle') == 'USDT'
             
-            # Solo agregamos si cumple las 3 condiciones vitales
             if is_swap and is_active and is_usdt_settled:
                 symbols.append(symbol)
                 
         logger.info(f"Encontrados {len(symbols)} mercados Swap USDT 100% operables en {modo_str}.")
         
         # 3. Escaneo por lotes
-        batch_size = 10
+        batch_size = 20
         results = []
         
         for i in range(0, len(symbols), batch_size):
@@ -71,85 +55,94 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for res in batch_results:
-                if isinstance(res, dict) and res.get('cv') is not None:
+                if isinstance(res, dict) and res.get('score') is not None:
                     results.append(res)
                     
             logger.info(f"Progreso Screener: {min(i+batch_size, len(symbols))}/{len(symbols)}")
             await asyncio.sleep(0.5) 
             
         logger.info(f"Símbolos escaneados: {len(results)}")
+        
+        # 4. Ordenamiento por SCORE (Los más prometedores primero)
         valid_results = results
-        logger.info(f"Símbolos válidos (avg_body_pct >= 0.20): {len(valid_results)}")
-
-        # 4. Ordenamiento
-        valid_results.sort(key=lambda x: x.get('avg_body_pct', 0), reverse=True)
-        valid_symbols = valid_results
+        valid_results.sort(key=lambda x: x.get('score', 0), reverse=True)
         
-        logger.info(f"Screener terminado. {len(valid_symbols)} seleccionados (todos los válidos).")
+        logger.info(f"Screener terminado. {len(valid_results)} seleccionados y ordenados por Score.")
         
-        return valid_symbols
+        return valid_results
         
     finally:
         await exchange.close()
 
 
-async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=200):
+async def fetch_and_calculate_cv(exchange, symbol, timeframe="5m", limit=288):
     try:
         # 1. Obtener límites de OKX para validación nominal
         market = exchange.markets.get(symbol, {})
-        min_qty = float(market.get("limits", {}).get("amount", {}).get("min", 1.0))
         contract_size = float(market.get("contractSize", 1.0))
         
-        # Velas de 15m para detectar tendencia macro sin ruido
+        # Descargar Velas
         ohlcvs = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         if not ohlcvs or len(ohlcvs) < 100:
-            return {'symbol': symbol, 'cv': None}
+            return {'symbol': symbol, 'score': None}
             
         df = pd.DataFrame(ohlcvs, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 2. Amplitud Real de Operatividad (High - Low)
-        df["amplitud"] = (df["high"] - df["low"]) / df["open"]
+        # 2. Cálculos de Vela (Tamaño y Calidad)
+        df['body_pct'] = abs(df['close'] - df['open']) / df['open'] * 100
+        df['range_pct'] = (df['high'] - df['low']) / df['low'] * 100
         
-        # Filtro Anti-Outliers: Eliminar mechas anómalas (> 3 desviaciones estándar)
-        mean_amp = df["amplitud"].mean()
-        std_amp = df["amplitud"].std()
-        df_clean = df[df["amplitud"] < (mean_amp + (3 * std_amp))]
+        # ---------------------------------------------------------
+        # 🚨 NUEVO: FILTRO ANTI-ANOMALÍAS (PUMP & DUMP / MECHAZOS)
+        # ---------------------------------------------------------
+        max_range = df['range_pct'].max()
+        max_body = df['body_pct'].max()
+        median_body = max(df['body_pct'].median(), 0.001) # Evitar división por cero
         
-        avg_amplitude = df_clean["amplitud"].mean()
-        
-        # Sin filtro de amplitud mínima
-        avg_amplitude_val = avg_amplitude if pd.notna(avg_amplitude) else 0.001
+        # Regla A: Si hay una vela que se movió más de 7% en 5 min, es un peligro para el grid.
+        if max_range > 7.0:
+            return {'symbol': symbol, 'score': None}
             
-        # 3. Contexto Direccional (EMAs)
-        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+        # Regla B: Si la vela máxima es 10 veces más grande que la vela típica (mediana), no es constante.
+        if (max_body / median_body) > 10.0:
+            return {'symbol': symbol, 'score': None}
+        # ---------------------------------------------------------
+        
+        # Calidad: Qué tanto del rango total es cuerpo (evita mechazos)
+        df['quality'] = np.where(df['range_pct'] > 0, df['body_pct'] / df['range_pct'], 0)
+        
+        # 3. Contexto Direccional (EMAs rápidas para 5m)
+        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
         
         precio_actual = df['close'].iloc[-1]
-        ema50 = df['ema50'].iloc[-1]
-        ema200 = df['ema200'].iloc[-1]
+        ema9 = df['ema9'].iloc[-1]
+        ema21 = df['ema21'].iloc[-1]
         
-        if precio_actual > ema50 > ema200:
+        if ema9 > ema21:
             trend = 'long'
-        elif precio_actual < ema50 < ema200:
+        elif ema9 < ema21:
             trend = 'short'
         else:
             trend = 'neutral'
             
-        # 4. Validación Nominal (Grid de 4 líneas con 7.5 USDT a 15x)
-        # 7.5 * 15 = 112.5 USDT totales / 4 líneas = 28.125 USDT por orden
-        inversion_por_linea = (7.5 * 15.0) / 4.0 
-        qty_necesaria = (inversion_por_linea / precio_actual) / contract_size
+        # 4. Métricas Agregadas (Predictibilidad)
+        avg_body = df['body_pct'].mean()
+        avg_quality = df['quality'].mean()
+        std_dev = df['body_pct'].std() + 1e-5  # Evitar división por cero
         
-        # Sin filtro de cantidad mínima nominal
+        # 5. SCORE: (Tamaño * Calidad) / Volatilidad Errática
+        score = (avg_body * avg_quality) / std_dev
         
         return {
             'symbol': symbol,
-            'avg_body_pct': float(avg_amplitude_val * 100), # Reutilizamos esta variable para la IA
-            'cv': 1.0, # Dummy para pasar el filtro antiguo
+            'score': float(score),
+            'avg_body_pct': float(avg_body),
+            'quality': float(avg_quality),
+            'std_dev': float(std_dev),
             'trend': trend,
             'precio_actual': float(precio_actual)
         }
     except Exception as e:
-       #_check_okx_51155(e)  Re-lanza la excepción si es error de 
        logger.error(f"Error al analizar el símbolo {symbol}: {e}")
-    return {'symbol': symbol, 'cv': None}
+    return {'symbol': symbol, 'score': None}

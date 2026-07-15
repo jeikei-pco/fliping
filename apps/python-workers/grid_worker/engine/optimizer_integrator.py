@@ -5,44 +5,55 @@ logger = logging.getLogger("GridWorker.OptimizerIntegrator")
 def optimize_grid_params(ai_params, screener_data):
     """
     Verifica si los parámetros de la IA son válidos. 
-    Si la IA no optimizó (retorna None o vacío) o los parámetros parecen fuera de rango,
-    calcula una alternativa basada en el resultado del screener de consistencia.
-    
-    :param ai_params: Resultado directo de la consulta de IA (dict o None).
-    :param screener_data: Resultado del `consistency_screener.py` para ese símbolo.
-    :return: Diccionario con los parámetros finales validados.
+    Si la IA no optimizó, calcula una alternativa basada en el resultado del screener de consistencia.
     """
     
     # 1. Validación de existencia
     if ai_params:
-        logger.info(f"Parámetros de IA recibidos para {screener_data['symbol']}. Validando...")
-        # Se puede añadir lógica adicional de validación de rangos aquí si es necesario
+        logger.info(f"Parámetros de IA recibidos para {screener_data.get('symbol')}. Validando...")
         return ai_params
     
-    # 2. Si la IA falló o no retornó datos, aplicamos la heurística basada en el Screener
-    logger.warning(f"IA no optimizó para {screener_data['symbol']}. Aplicando fallback de consistencia.")
+    logger.warning(f"IA no optimizó para {screener_data.get('symbol')}. Aplicando fallback de consistencia.")
     
-    avg_body = screener_data.get('avg_body_pct', 0.5) # Ya está en porcentaje (ej: 0.5)
+    # Extraer métricas del screener (con valores por defecto seguros)
+    avg_body = screener_data.get('avg_body_pct', 0.5)
+    std_dev = screener_data.get('std_dev', 0.1)
+    quality = screener_data.get('quality', 0.5)
     
-    # Lógica de cálculo basada en los datos recolectados por el screener
-    # Spacing: Capturar el 75% de la oscilación media para maximizar cruces
-    grid_spacing = max(0.15, round(avg_body * 0.75, 2))
+    # 2. Desplazamiento (Grid Spacing)
+    # Si la calidad es baja (muchas mechas), ampliamos el espaciado un 20% extra
+    base_spacing = avg_body * 0.8
+    quality_modifier = 1.0 if quality > 0.5 else 1.2
+    grid_spacing = max(0.15, round(base_spacing * quality_modifier, 2))
     
-    # Leverage: Conservador basado en amplitud, limitado a 15x
-    leverage = min(15.0, max(2.0, round(50.0 / (avg_body if avg_body > 0 else 0.5))))
-    
-    # Líneas: Ajuste dinámico según volatilidad
-    if avg_body > 2.0:
+    # 3. Líneas de Malla (Grid Lines)
+    # A mayor volatilidad total, más líneas para distribuir el capital
+    volatility_score = avg_body + std_dev
+    if volatility_score > 2.0:
         grid_lines = 20
-    elif avg_body > 1.0:
-        grid_lines = 15
+    elif volatility_score > 1.0:
+        grid_lines = 14
     else:
-        grid_lines = 10
+        grid_lines = 8
+        
+    # 4. Apalancamiento (Leverage)
+    # Inversamente proporcional al tamaño de la vela. Max 20x, Min 2x.
+    leverage = min(20.0, max(2.0, round(15.0 / (avg_body if avg_body > 0 else 0.5))))
+    
+    # 5. Frecuencia de Recálculo (Minutos)
+    # Si el par es muy errático (alta desviación), recalculamos la malla más rápido
+    if std_dev > 0.5:
+        recalc_minutes = 60   # Cada hora (12 velas de 5m)
+    elif std_dev > 0.2:
+        recalc_minutes = 120  # Cada 2 horas (24 velas de 5m)
+    else:
+        recalc_minutes = 240  # Cada 4 horas (48 velas de 5m)
         
     return {
         "grid_spacing_factor": grid_spacing,
         "grid_lines": grid_lines,
-        "leverage": leverage,
+        "leverage": int(leverage),
+        "recalculate_every_minutes": recalc_minutes,
         "direction": screener_data.get('trend', 'neutral'),
         "source": "consistency_screener_fallback"
     }

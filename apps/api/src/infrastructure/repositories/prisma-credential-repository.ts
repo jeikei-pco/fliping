@@ -11,9 +11,10 @@ export class PrismaCredentialRepository implements CredentialRepository {
   async save(input: SaveCredentialInput, encryptedPayload: string): Promise<CredentialRecord> {
     const credential = await this.prisma.credential.upsert({
       where: {
-        userId_provider: {
+        userId_provider_sandbox: {
           userId: input.userId,
           provider: input.provider,
+          sandbox: input.sandbox ?? false,
         },
       },
       update: {
@@ -47,14 +48,26 @@ export class PrismaCredentialRepository implements CredentialRepository {
     return credentials.map((credential) => this.mapCredential(credential));
   }
 
-  async findByProvider(userId: string, provider: string): Promise<CredentialRecord | null> {
-    const credential = await this.prisma.credential.findUnique({
-      where: {
-        userId_provider: {
-          userId,
-          provider,
+  async findByProvider(userId: string, provider: string, sandbox?: boolean): Promise<CredentialRecord | null> {
+    if (sandbox !== undefined) {
+      const credential = await this.prisma.credential.findUnique({
+        where: {
+          userId_provider_sandbox: {
+            userId,
+            provider,
+            sandbox,
+          },
         },
+      });
+      return credential ? this.mapCredential(credential) : null;
+    }
+
+    const credential = await this.prisma.credential.findFirst({
+      where: {
+        userId,
+        provider,
       },
+      orderBy: { updatedAt: "desc" },
     });
 
     return credential ? this.mapCredential(credential) : null;

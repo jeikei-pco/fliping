@@ -32,9 +32,9 @@ export class PrismaEngineStatusRepository implements EngineStatusRepository {
         enabled: input.enabled,
         startedAt: input.startedAt ? new Date(input.startedAt) : undefined,
         lastRunAt: input.lastRunAt ? new Date(input.lastRunAt) : undefined,
-        lastResult: input.lastResult ?? null,
-        lastError: input.lastError ?? null,
-        config: input.config ?? null,
+        lastResult: input.lastResult !== undefined ? input.lastResult : undefined,
+        lastError: input.lastError !== undefined ? input.lastError : undefined,
+        config: input.config !== undefined ? input.config : undefined,
       },
       create: {
         id: randomUUID(),

@@ -153,13 +153,29 @@ export default function App() {
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [balances, setBalances] = useState<BalanceResponse | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus>(defaultEngineStatus);
-  const [okxSandbox, setOkxSandbox] = useState(true);
-  const [okxApiKey, setOkxApiKey] = useState("");
-  const [okxSecret, setOkxSecret] = useState("");
-  const [okxPassphrase, setOkxPassphrase] = useState("");
+  const [activeExchange, setActiveExchange] = useState("okx");
+  const [activeSandbox, setActiveSandbox] = useState(true);
+  const [exchangeConfigured, setExchangeConfigured] = useState(false);
+  const [exchangeApiKey, setExchangeApiKey] = useState("");
+  const [exchangeSecret, setExchangeSecret] = useState("");
+  const [exchangePassphrase, setExchangePassphrase] = useState("");
   const [openRouterApiKey, setOpenRouterApiKey] = useState("");
   const [firecrawlApiKey, setFirecrawlApiKey] = useState("");
   const [providerStatuses, setProviderStatuses] = useState<ProviderStatus[]>([]);
+
+  useEffect(() => {
+    const cred = credentials.find(c => c.provider === activeExchange && c.sandbox === activeSandbox);
+    setExchangeConfigured(!!cred);
+    if (cred) {
+      setExchangeApiKey(MASKED_PLACEHOLDER);
+      setExchangeSecret(MASKED_PLACEHOLDER);
+      if (activeExchange !== "binance") setExchangePassphrase(MASKED_PLACEHOLDER);
+    } else {
+      setExchangeApiKey("");
+      setExchangeSecret("");
+      setExchangePassphrase("");
+    }
+  }, [activeExchange, activeSandbox, credentials]);
 
   // Sprint 3 & 4
   const [flippingEngines, setFlippingEngines] = useState<FlippingEngineStatus[]>(defaultFlippingEngines);
@@ -175,6 +191,7 @@ export default function App() {
   const [backtestTop10, setBacktestTop10] = useState<any[]>([]);
   const [selectedBacktestSymbol, setSelectedBacktestSymbol] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [showGridConfig, setShowGridConfig] = useState(false);
   
   const [gridBaseCapital, setGridBaseCapital] = useState("50");
   const [gridMaxLeverage, setGridMaxLeverage] = useState("15");
@@ -210,7 +227,7 @@ export default function App() {
 
   useEffect(() => {
     if (screen === "dashboard") {
-      void Promise.all([loadCredentials(), loadBalances(), loadEngineStatus(), loadFlippingEngines()]);
+      void Promise.all([loadEngineConfig(), loadCredentials(), loadBalances(), loadEngineStatus(), loadFlippingEngines()]);
     }
     if (screen === "alerts") {
       void loadAlerts();
@@ -219,6 +236,7 @@ export default function App() {
       void loadOpportunities();
     }
     if (screen === "config") {
+      void loadEngineConfig();
       void loadCredentialStatus();
       void loadCredentials();
     }
@@ -301,20 +319,24 @@ export default function App() {
     }
   };
 
+  const loadEngineConfig = async () => {
+    try {
+      const config = await callApi<{ activeExchange: string; useSandbox: boolean }>("/api/engine/config");
+      setActiveExchange(config.activeExchange);
+      setActiveSandbox(config.useSandbox);
+    } catch {
+      // silencioso
+    }
+  };
+
   const loadCredentialStatus = async () => {
     try {
       const result = await callApi<{ providers: ProviderStatus[] }>("/api/keys/status");
       setProviderStatuses(result.providers);
       
-      // Pre-rellenar campos con valores enmascarados para que el usuario vea que ya están configurados
       for (const p of result.providers) {
         if (!p.configured) continue;
-        if (p.provider === "okx") {
-          if (!okxApiKey || okxApiKey === MASKED_PLACEHOLDER) setOkxApiKey(p.maskedApiKey ?? MASKED_PLACEHOLDER);
-          if (!okxSecret || okxSecret === MASKED_PLACEHOLDER) setOkxSecret(p.maskedSecret ?? MASKED_PLACEHOLDER);
-          if (!okxPassphrase || okxPassphrase === MASKED_PLACEHOLDER) setOkxPassphrase(p.hasPassphrase ? MASKED_PLACEHOLDER : "");
-          if (p.sandbox !== undefined) setOkxSandbox(p.sandbox);
-        } else if (p.provider === "openrouter") {
+        if (p.provider === "openrouter") {
           if (!openRouterApiKey || openRouterApiKey === MASKED_PLACEHOLDER) setOpenRouterApiKey(p.maskedApiKey ?? MASKED_PLACEHOLDER);
         } else if (p.provider === "firecrawl") {
           if (!firecrawlApiKey || firecrawlApiKey === MASKED_PLACEHOLDER) setFirecrawlApiKey(p.maskedApiKey ?? MASKED_PLACEHOLDER);
@@ -327,7 +349,7 @@ export default function App() {
 
   const loadBalances = async () => {
     try {
-      const result = await callApi<BalanceResponse>(`/api/balances?exchange=okx&sandbox=${okxSandbox}`);
+      const result = await callApi<BalanceResponse>("/api/balances");
       setBalances(result);
     } catch (error) {
       Alert.alert("Balances", error instanceof Error ? error.message : "No se pudo consultar balances.");
@@ -358,15 +380,15 @@ export default function App() {
 
   const isMasked = (value: string) => value.includes("••••");
 
-  const saveOkxKeys = async () => {
-    if (isMasked(okxApiKey) && isMasked(okxSecret)) {
-      Alert.alert("Bóveda", "Las credenciales de OKX ya están configuradas. Ingresa valores nuevos solo si deseas cambiarlas.");
+  const saveExchangeKeys = async () => {
+    if (isMasked(exchangeApiKey) && isMasked(exchangeSecret)) {
+      Alert.alert("Bóveda", `Las credenciales de ${activeExchange} ya están configuradas. Ingresa valores nuevos solo si deseas cambiarlas.`);
       return;
     }
     await saveCredential(
-      { providerKind: "exchange", provider: "okx", label: "OKX principal", sandbox: okxSandbox,
-        payload: { apiKey: okxApiKey, secret: okxSecret, passphrase: okxPassphrase } },
-      "Credenciales de OKX guardadas.",
+      { providerKind: "exchange", provider: activeExchange, label: `${activeExchange} (${activeSandbox ? "Sandbox" : "Live"})`, sandbox: activeSandbox,
+        payload: { apiKey: exchangeApiKey, secret: exchangeSecret, passphrase: exchangePassphrase } },
+      `Credenciales de ${activeExchange} guardadas.`,
     );
   };
 
@@ -392,12 +414,30 @@ export default function App() {
     );
   };
 
+  const saveActiveEngineConfig = async (exchange: string, sandbox: boolean) => {
+    setLoading(true);
+    try {
+      await callApi("/api/engine/config", {
+        method: "POST",
+        body: JSON.stringify({ activeExchange: exchange, useSandbox: sandbox }),
+      });
+      setActiveExchange(exchange);
+      setActiveSandbox(sandbox);
+      Alert.alert("Éxito", "Configuración activa del motor actualizada");
+      await loadBalances();
+    } catch (error) {
+      Alert.alert("Error", error instanceof Error ? error.message : "No se pudo actualizar la configuración.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const toggleCryptoEngine = async (enabled: boolean) => {
     setLoading(true);
     try {
       const result = await callApi<EngineStatus>("/api/engine/toggle", {
         method: "POST",
-        body: JSON.stringify({ enabled, exchange: "okx", symbol: "BTC/USDT", sandbox: okxSandbox }),
+        body: JSON.stringify({ enabled, exchange: activeExchange, symbol: "BTC/USDT", sandbox: activeSandbox }),
       });
       setEngineStatus(result);
     } catch (error) {
@@ -594,26 +634,51 @@ export default function App() {
           {screen === "config" && (
             <>
               <Panel>
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                  <Text style={styles.sectionTitle}>Bóveda OKX</Text>
-                  {providerStatuses.find(p => p.provider === "okx")?.configured && (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <Text style={styles.sectionTitle}>Bóveda Exchange Activo</Text>
+                  {exchangeConfigured && (
                     <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "rgba(32,201,151,0.15)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 }}>
                       <Text style={{ color: colors.success, fontSize: 12, fontWeight: "700" }}>✅ Configurado</Text>
                     </View>
                   )}
                 </View>
+                
+                <Text style={styles.fieldLabel}>Exchange</Text>
+                <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
+                  {["okx", "binance", "bybit"].map(ex => (
+                    <Pressable
+                      key={ex}
+                      style={[styles.tabButton, activeExchange === ex && styles.tabButtonActive, { flex: 1, alignItems: "center" }]}
+                      onPress={() => setActiveExchange(ex)}
+                    >
+                      <Text style={[styles.tabLabel, activeExchange === ex && styles.tabLabelActive, { textTransform: "capitalize" }]}>{ex}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
                 <RowBetween
                   left="Modo sandbox"
                   right={
-                    <Switch value={okxSandbox} onValueChange={setOkxSandbox}
+                    <Switch value={activeSandbox} onValueChange={(val) => setActiveSandbox(val)}
                       trackColor={{ false: "#38506f", true: "#2f6ae6" }} thumbColor="#ffffff" />
                   }
                 />
-                <Field label="API Key" value={okxApiKey} onChangeText={setOkxApiKey} autoCapitalize="none" />
-                <Field label="Secret" value={okxSecret} onChangeText={setOkxSecret} secureTextEntry />
-                <Field label="Passphrase" value={okxPassphrase} onChangeText={setOkxPassphrase} secureTextEntry />
-                <Pressable style={styles.primaryButton} onPress={() => void saveOkxKeys()}>
-                  <Text style={styles.primaryButtonText}>Guardar OKX</Text>
+                
+                <Pressable style={styles.secondaryButtonCompact} onPress={() => saveActiveEngineConfig(activeExchange, activeSandbox)}>
+                  <Text style={styles.secondaryButtonText}>Aplicar como Motor Activo</Text>
+                </Pressable>
+
+                <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 12 }} />
+
+                <Text style={styles.fieldLabel}>Credenciales para {activeExchange} ({activeSandbox ? 'Sandbox' : 'Live'})</Text>
+
+                <Field label="API Key" value={exchangeApiKey} onChangeText={setExchangeApiKey} autoCapitalize="none" />
+                <Field label="Secret" value={exchangeSecret} onChangeText={setExchangeSecret} secureTextEntry />
+                {activeExchange !== "binance" && (
+                  <Field label="Passphrase" value={exchangePassphrase} onChangeText={setExchangePassphrase} secureTextEntry />
+                )}
+                <Pressable style={styles.primaryButton} onPress={() => void saveExchangeKeys()}>
+                  <Text style={styles.primaryButtonText}>Guardar Credenciales</Text>
                 </Pressable>
               </Panel>
 
@@ -776,8 +841,14 @@ export default function App() {
           {screen === "grid" && (
             <>
               <Panel>
-                <Text style={styles.sectionTitle}>Estado del Worker (Python)</Text>
-                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 16 }}>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.sectionTitle}>Estado del Worker</Text>
+                  <Pressable onPress={() => setShowGridConfig(true)}>
+                    <Text style={{ fontSize: 24 }}>⚙️</Text>
+                  </Pressable>
+                </View>
+                
+                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 16, marginTop: 10 }}>
                   <View style={{
                     width: 12, height: 12, borderRadius: 6,
                     backgroundColor: gridWorkerStatus === "Running" ? colors.success : (gridWorkerStatus === "Online" ? colors.accent : colors.danger),
@@ -787,37 +858,12 @@ export default function App() {
                 </View>
                 
                 {gridMetrics && (
-                  <View style={{ marginBottom: 16 }}>
+                  <View style={{ marginBottom: 16, gap: 4 }}>
                     <Text style={{ color: colors.muted }}>Par Activo: <Text style={{ color: colors.text }}>{gridMetrics.symbol}</Text></Text>
                     <Text style={{ color: colors.muted }}>Precio: <Text style={{ color: colors.success }}>{gridMetrics.last_price}</Text></Text>
-                    <Text style={{ color: colors.muted }}>CV: <Text style={{ color: colors.text }}>{gridMetrics.cv?.toFixed(5) ?? "N/A"}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Keltner Mid: <Text style={{ color: colors.text }}>{gridMetrics.keltner?.middle?.toFixed(2) ?? "N/A"}</Text></Text>
-                  </View>
-                )}
-
-
-
-                <View style={{ marginTop: 16, marginBottom: 8, padding: 12, backgroundColor: "rgba(255,255,255,0.03)", borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
-                  <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 8 }]}>⚙️ Configuración del Motor</Text>
-                  <Field label="Capital Base por Grid (USDT)" value={gridBaseCapital} onChangeText={setGridBaseCapital} keyboardType="numeric" />
-                  <Field label="Apalancamiento Máximo Permitido" value={gridMaxLeverage} onChangeText={setGridMaxLeverage} keyboardType="numeric" />
-                  <Pressable style={[styles.primaryButton, { marginTop: 8 }]} onPress={() => void saveGridConfig()}>
-                    <Text style={styles.primaryButtonText}>Guardar Configuración</Text>
-                  </Pressable>
-                </View>
-
-                {gridMetrics?.ai_recommendation && (
-                  <View style={{ marginTop: 16, marginBottom: 8, padding: 12, backgroundColor: "rgba(138,43,226,0.1)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(138,43,226,0.3)" }}>
-                    <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 8, color: "#d0a8f9" }]}>🧠 Recomendación de la IA ({gridMetrics.ai_recommendation.source || "LLM"})</Text>
-                    <Text style={{ color: colors.muted, marginBottom: 4 }}>
-                      Leverage Sugerido: <Text style={{ color: colors.text, fontWeight: "700" }}>{gridMetrics.ai_recommendation.leverage}x</Text>
-                    </Text>
-                    <Text style={{ color: colors.muted }}>
-                      Grid Spacing Factor: <Text style={{ color: colors.text, fontWeight: "700" }}>{gridMetrics.ai_recommendation.grid_spacing_factor}x</Text>
-                    </Text>
-                    <Text style={{ color: colors.muted, fontSize: 11, marginTop: 8 }}>
-                      El IA calculó estos valores basándose en el CV y el Riesgo (Drawdown).
-                    </Text>
+                    <Text style={{ color: colors.muted }}>Posiciones Activas: <Text style={{ color: colors.warning }}>{gridMetrics.position_count ?? 0}</Text></Text>
+                    <Text style={{ color: colors.muted }}>Órdenes Abiertas: <Text style={{ color: colors.accent }}>{gridMetrics.open_orders ?? 0}</Text></Text>
+                    <Text style={{ color: colors.muted }}>PnL (Flotante): <Text style={{ color: (gridMetrics.unrealized_pnl ?? 0) >= 0 ? colors.success : colors.danger }}>${gridMetrics.unrealized_pnl?.toFixed(4) ?? "0.0000"}</Text></Text>
                   </View>
                 )}
 
@@ -976,7 +1022,7 @@ export default function App() {
                     trackColor={{ false: "#38506f", true: "#2f6ae6" }} thumbColor="#ffffff" />
                 }
               >
-                <Text style={styles.cardMeta}>Exchange: OKX · {okxSandbox ? "sandbox" : "live"}</Text>
+                <Text style={styles.cardMeta}>Exchange: {activeExchange} · {activeSandbox ? "sandbox" : "live"}</Text>
                 <Text style={styles.cardMeta}>Par: {engineStatus.symbol}</Text>
                 <Text style={styles.cardMeta}>
                   Ticker: {engineStatus.lastTicker?.last ?? "–"} | Bid {engineStatus.lastTicker?.bid ?? "–"} | Ask {engineStatus.lastTicker?.ask ?? "–"}
@@ -1089,8 +1135,43 @@ export default function App() {
               </Panel>
             </>
           )}
+          )}
         </ScrollView>
       )}
+
+      {/* ── MODAL: CONFIG GRID ── */}
+      <Modal visible={showGridConfig} animationType="slide" transparent onRequestClose={() => setShowGridConfig(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalSheet, { paddingBottom: 40 }]}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.sectionTitle}>⚙️ Configuración del Motor</Text>
+              <Pressable onPress={() => setShowGridConfig(false)}>
+                <Text style={{ color: colors.muted, fontSize: 20, paddingLeft: 12 }}>✕</Text>
+              </Pressable>
+            </View>
+
+            <View style={{ marginTop: 16, gap: 12 }}>
+              <Field label="Capital Base por Grid (USDT)" value={gridBaseCapital} onChangeText={setGridBaseCapital} keyboardType="numeric" />
+              <Field label="Apalancamiento Máximo Permitido" value={gridMaxLeverage} onChangeText={setGridMaxLeverage} keyboardType="numeric" />
+              <Pressable style={[styles.primaryButton, { marginTop: 8 }]} onPress={() => { void saveGridConfig(); setShowGridConfig(false); }}>
+                <Text style={styles.primaryButtonText}>Guardar Configuración</Text>
+              </Pressable>
+            </View>
+
+            {gridMetrics?.ai_recommendation && (
+              <View style={{ marginTop: 24, padding: 12, backgroundColor: "rgba(138,43,226,0.1)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(138,43,226,0.3)" }}>
+                <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 8, color: "#d0a8f9" }]}>🧠 Parámetros IA Actuales ({gridMetrics.ai_recommendation.source || "LLM"})</Text>
+                <Text style={{ color: colors.muted, marginBottom: 4 }}>
+                  Leverage Sugerido: <Text style={{ color: colors.text, fontWeight: "700" }}>{gridMetrics.ai_recommendation.leverage}x</Text>
+                </Text>
+                <Text style={{ color: colors.muted }}>
+                  Grid Spacing Factor: <Text style={{ color: colors.text, fontWeight: "700" }}>{gridMetrics.ai_recommendation.grid_spacing_factor}x</Text>
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
 
       {/* ── MODAL: DETALLE DE OPORTUNIDAD ── */}
       <Modal visible={!!selectedOpportunity} animationType="slide" transparent onRequestClose={() => setSelectedOpportunity(null)}>

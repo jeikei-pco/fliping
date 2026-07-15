@@ -18,7 +18,7 @@ import type {
 export interface CredentialRepository {
   save(input: SaveCredentialInput, encryptedPayload: string): Promise<CredentialRecord>;
   listByUser(userId: string): Promise<CredentialRecord[]>;
-  findByProvider(userId: string, provider: string): Promise<CredentialRecord | null>;
+  findByProvider(userId: string, provider: string, sandbox?: boolean): Promise<CredentialRecord | null>;
 }
 
 export interface EncryptionPort {

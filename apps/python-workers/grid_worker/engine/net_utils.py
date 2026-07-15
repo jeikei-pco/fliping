@@ -12,37 +12,35 @@ import aiohttp
 
 def patch_ccxt_resolver(exchange):
     """
-    Monkey-patch para forzar ThreadedResolver en la sesión aiohttp de ccxt.
-    Debe llamarse DESPUÉS de crear la instancia del exchange y ANTES de
-    cualquier llamada de red (load_markets, fetch_ohlcv, etc.).
+    Pre-inicializa el tcp_connector de aiohttp con ThreadedResolver.
+    Al hacer esto antes de que CCXT llame a open(), CCXT usará este conector
+    pero inicializará la sesión con todos los headers y parámetros necesarios,
+    evitando romper la autenticación de WebSockets privados.
     """
-    original_open = exchange.open
+    import asyncio
+    import ssl
+    import socket
+    import aiohttp
 
-    def patched_open(self_ref=exchange):
-        if self_ref.session is None:
-            if self_ref.asyncio_loop is None:
-                self_ref.asyncio_loop = asyncio.get_running_loop()
-                self_ref.throttler.loop = self_ref.asyncio_loop
-            if self_ref.ssl_context is None:
-                self_ref.ssl_context = (
-                    ssl.create_default_context(cafile=self_ref.cafile)
-                    if self_ref.verify else self_ref.verify
-                )
-            import socket
-            resolver = aiohttp.resolver.ThreadedResolver()
-            self_ref.tcp_connector = aiohttp.TCPConnector(
-                ssl=self_ref.ssl_context,
-                loop=self_ref.asyncio_loop,
-                enable_cleanup_closed=True,
-                resolver=resolver,
-                family=socket.AF_INET,
-            )
-            self_ref.session = aiohttp.ClientSession(
-                loop=self_ref.asyncio_loop,
-                connector=self_ref.tcp_connector,
-                trust_env=self_ref.aiohttp_trust_env,
-            )
+    if getattr(exchange, 'tcp_connector', None) is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            
+        verify = getattr(exchange, 'verify', True)
+        cafile = getattr(exchange, 'cafile', None)
+        
+        if verify:
+            ssl_context = ssl.create_default_context(cafile=cafile)
         else:
-            original_open()
+            ssl_context = False
 
-    exchange.open = patched_open
+        resolver = aiohttp.resolver.ThreadedResolver()
+        exchange.tcp_connector = aiohttp.TCPConnector(
+            ssl=ssl_context,
+            loop=loop,
+            enable_cleanup_closed=True,
+            resolver=resolver,
+            family=socket.AF_INET,
+        )

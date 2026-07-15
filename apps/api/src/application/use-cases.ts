@@ -52,8 +52,8 @@ export class CredentialVaultService {
     }));
   }
 
-  async getDecryptedProvider(userId: string, provider: string) {
-    const record = await this.repository.findByProvider(userId, provider);
+  async getDecryptedProvider(userId: string, provider: string, sandbox?: boolean) {
+    const record = await this.repository.findByProvider(userId, provider, sandbox);
     if (!record) {
       return null;
     }

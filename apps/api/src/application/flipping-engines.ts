@@ -67,6 +67,16 @@ export class EngineManagerService {
   async setEnabled(userId: string, motor: MotorKind, enabled: boolean): Promise<EngineStatusRecord> {
     return this.repository.save({ userId, motor, enabled });
   }
+
+  async setConfig(userId: string, motor: MotorKind, config: string): Promise<EngineStatusRecord> {
+    const current = await this.getStatus(userId, motor);
+    return this.repository.save({ 
+      userId, 
+      motor, 
+      enabled: current ? current.enabled : false, 
+      config 
+    });
+  }
 }
 
 // ======================================================================

@@ -34,7 +34,7 @@ model Credential {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   user             AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@unique([userId, provider])
+  @@unique([userId, provider, sandbox])
   @@index([userId])
   @@map("credentials")
 }
