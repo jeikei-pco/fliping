@@ -152,14 +152,6 @@ async def detect_active_exchange_grid(exchange_id, api_key, secret, passphrase, 
         else:
             source = "none"
 
-        logger.info(
-            "Validación OKX -> source=%s, symbol=%s, positions=%s, entry_orders=%s",
-            source,
-            symbol,
-            len(active_positions),
-            len(entry_orders),
-        )
-
         return {
             'has_active_grid': bool(symbol),
             'symbol': symbol,
@@ -169,6 +161,7 @@ async def detect_active_exchange_grid(exchange_id, api_key, secret, passphrase, 
         }
     finally:
         await exchange.close()
+
 
 class OkxWsClient:
     def __init__(
@@ -191,7 +184,6 @@ class OkxWsClient:
         self._sandbox = sandbox
 
         self.symbol = symbol
-        logger.info("Symbol -> %s", symbol)
         self.timeframe = timeframe
         self.running = False
         self.base_capital = base_capital
@@ -211,243 +203,148 @@ class OkxWsClient:
             "exchange_mode": "DEMO/SANDBOX" if sandbox else "REAL"
         }
         
-        # Variables de memoria para el Grid Continuo
         self.grid_spacing_usd = 0.0
-        self.processed_orders = set() # Filtro Anti-Spam
+        self.grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
+        self.processed_orders = set()
+        self.ultima_ejecucion_ts = time.time()
         
-        logger.info(f"🚀 Motor de Trading (OkxWsClient) Inicializado en modo: {self.metrics['exchange_mode']}")
+        # OKX VIP0 Fees: Maker 0.02%, Taker 0.05%. Buscamos cubrir ida y vuelta + profit.
+        self.min_profit_margin = 0.0015 # 0.15% mínimo de movimiento para ser rentable
         
+        logger.info(f"🚀 Motor HFT Grid Inicializado: {self.metrics['exchange_mode']} | Symbol: {self.symbol}")
+
     async def fetch_historical_candles(self, limit=50):
         try:
-            logger.info(f"Cargando {limit} velas históricas para {self.symbol} ({self.timeframe})...")
             ohlcvs = await self.exchange.fetch_ohlcv(self.symbol, self.timeframe, limit=limit)
-            
-            data = []
-            for ohlcv in ohlcvs:
-                data.append({
-                    'timestamp': pd.to_datetime(ohlcv[0], unit='ms'),
-                    'open': ohlcv[1],
-                    'high': ohlcv[2],
-                    'low': ohlcv[3],
-                    'close': ohlcv[4],
-                    'volume': ohlcv[5]
-                })
+            data = [{'timestamp': pd.to_datetime(c[0], unit='ms'), 'open': c[1], 'high': c[2], 'low': c[3], 'close': c[4], 'volume': c[5]} for c in ohlcvs]
             self.df = pd.DataFrame(data)
-            logger.info("Velas históricas cargadas exitosamente.")
             self.update_metrics()
         except Exception as e:
-            logger.error(f"Error cargando velas históricas: {e}")
+            logger.error(f"Error cargando velas: {e}")
 
     def update_metrics(self):
-        if len(self.df) < 20:
-            return
-            
+        if len(self.df) < 20: return
         upper, middle, lower = calculate_keltner_channels(self.df)
         cv = calculate_cv(self.df)
         
-        self.metrics["keltner"] = {
-            "upper": float(upper) if upper is not None else None,
-            "middle": float(middle) if middle is not None else None,
-            "lower": float(lower) if lower is not None else None
-        }
-        self.metrics["cv"] = float(cv) if cv is not None else None
+        self.metrics["keltner"] = {"upper": float(upper) if upper else None, "middle": float(middle) if middle else None, "lower": float(lower) if lower else None}
+        self.metrics["cv"] = float(cv) if cv else None
         self.metrics["last_price"] = float(self.df.iloc[-1]['close'])
         self.metrics["updated_at"] = datetime.now().isoformat()
-        
-        logger.info(f"Metrics Updated -> Last: {self.metrics['last_price']}, CV: {cv:.5f}, Mid: {middle:.2f}")
+
+        # 🧠 CÁLCULO DINÁMICO DE ESPACIADO (Expansión/Contracción)
+        if upper and lower:
+            keltner_width = float(upper) - float(lower)
+            dynamic_spacing = keltner_width / self.grid_lines
+            min_spacing_usd = self.metrics["last_price"] * self.min_profit_margin
+            
+            # El espaciado se adapta a la volatilidad, pero NUNCA baja del umbral de comisiones
+            self.grid_spacing_usd = max(dynamic_spacing, min_spacing_usd)
 
     async def setup_grid_orders(self):
         try:
-            # 1. Limpieza inicial
-            logger.info(f"Cancelando órdenes abiertas para {self.symbol}...")
-            try:
-                open_orders = await self.exchange.fetch_open_orders(self.symbol)
-                orders_to_cancel = [o['id'] for o in open_orders if not _is_reduce_only_order(o)]
-                if orders_to_cancel:
-                    await self.exchange.cancel_orders(orders_to_cancel, self.symbol)
-            except Exception as e:
-                logger.warning(f"Error gestionando órdenes previas: {e}")
+            logger.info(f"Centrando malla dinámica para {self.symbol}...")
+            open_orders = await self.exchange.fetch_open_orders(self.symbol)
+            orders_to_cancel = [o['id'] for o in open_orders if not _is_reduce_only_order(o)]
+            if orders_to_cancel: await self.exchange.cancel_orders(orders_to_cancel, self.symbol)
 
-            # 2. Configuración Dinámica
             leverage = float(self.ai_recommendation.get('leverage', 10.0))
+            try: await self.exchange.set_leverage(leverage, self.symbol)
+            except: pass
             try:
-                await self.exchange.set_leverage(leverage, self.symbol)
-            except Exception as e:
-                logger.warning(f"Error o no soportado set_leverage: {e}")
-                
-            try:
-                if self.exchange.has.get('setPositionMode'):
-                    await self.exchange.set_position_mode(False, self.symbol)
-            except Exception as e:
-                logger.warning(f"Error o no soportado set_position_mode (One-Way): {e}")
-                
-            try:
-                if self.exchange.has.get('setMarginMode'):
-                    await self.exchange.set_margin_mode('cross', self.symbol)
-            except Exception as e:
-                logger.warning(f"Error o no soportado set_margin_mode: {e}")
+                if self.exchange.has.get('setPositionMode'): await self.exchange.set_position_mode(False, self.symbol)
+            except: pass
 
-            grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
-            if grid_lines % 2 != 0: grid_lines += 1 
-            
-            buy_lines = grid_lines // 2
-            sell_lines = grid_lines // 2
-            
-            grid_spacing_factor = float(self.ai_recommendation.get('grid_spacing_factor', 0.5)) / 100.0
-            
-            # ---------------------------------------------------------
-            # 🚨 NUEVA LÓGICA DE CÁLCULO DE TAMAÑO DE ORDEN
-            # ---------------------------------------------------------
-            # 1. Dividimos la inversión total entre las líneas
-            inversion_base_por_linea = self.base_capital / grid_lines
-            
-            # 2. Multiplicamos por el apalancamiento para obtener el valor real de la orden en el mercado
-            valor_orden_apalancada = inversion_base_por_linea * leverage
-            
-            logger.info(f"💰 Capital Base: {self.base_capital} USDT | Líneas: {grid_lines} | Apalancamiento: {leverage}x")
-            logger.info(f"📊 Inversión real por línea: {inversion_base_por_linea:.2f} USDT -> Valor apalancado por orden: {valor_orden_apalancada:.2f} USDT")
-            # ---------------------------------------------------------
+            direction = self.ai_recommendation.get('direction', 'neutral')
+            buy_lines = max(1, int(self.grid_lines * (0.7 if direction == 'long' else 0.3 if direction == 'short' else 0.5)))
+            sell_lines = max(1, self.grid_lines - buy_lines)
 
-            await self.exchange.load_markets()
+            self.update_metrics() # Asegurar espaciado actualizado
             current_price = self.metrics['last_price']
             
-            # GUARDAR SPACING EN MEMORIA PARA EL GRID CONTINUO
-            self.grid_spacing_usd = current_price * grid_spacing_factor
-            
+            inversion_base_por_linea = self.base_capital / self.grid_lines
+            valor_orden_apalancada = inversion_base_por_linea * leverage
+
+            await self.exchange.load_markets()
             market = self.exchange.market(self.symbol)
             contract_size = market.get('contractSize', 1)
 
-            orders = []
-            logger.info(f"Grid Dinámico: {grid_lines} líneas -> {buy_lines} Buy | {sell_lines} Sell")
-
-            # Calculamos la cantidad de contratos/monedas usando el valor apalancado
             raw_amount = (valor_orden_apalancada / current_price) / contract_size
-            amount = float(self.exchange.amount_to_precision(self.symbol, raw_amount))
-            amount = max(amount, float(market['limits']['amount']['min'] or 1.0))
+            amount_str = self.exchange.amount_to_precision(self.symbol, raw_amount)
+            amount = max(float(amount_str), float(market['limits']['amount']['min'] or 1.0))
+            
+            # 🛡️ OKX requiere enteros para contratos de SWAP
+            if market.get('swap') or market.get('contract'):
+                amount = int(amount)
 
-            base_params = {}
-            if self._exchange_id == 'okx':
-                base_params['tdMode'] = 'cross'
+            base_params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True} # postOnly garantiza Maker Fee
+            orders = []
 
-            # Órdenes de Compra
             for i in range(1, buy_lines + 1):
                 price = float(self.exchange.price_to_precision(self.symbol, current_price - (i * self.grid_spacing_usd)))
-                params_buy = base_params.copy()
-                if self._exchange_id == 'okx': params_buy['posSide'] = 'net'
-                elif self._exchange_id == 'binance': params_buy['positionSide'] = 'BOTH'
-                
-                orders.append({
-                    'symbol': self.symbol, 'type': 'limit', 'side': 'buy',
-                    'amount': amount, 'price': price, 'params': params_buy
-                })
+                orders.append({'symbol': self.symbol, 'type': 'limit', 'side': 'buy', 'amount': amount, 'price': price, 'params': base_params.copy()})
             
-            # Órdenes de Venta
             for i in range(1, sell_lines + 1):
                 price = float(self.exchange.price_to_precision(self.symbol, current_price + (i * self.grid_spacing_usd)))
-                params_sell = base_params.copy()
-                if self._exchange_id == 'okx': params_sell['posSide'] = 'net'
-                elif self._exchange_id == 'binance': params_sell['positionSide'] = 'BOTH'
-                
-                orders.append({
-                    'symbol': self.symbol, 'type': 'limit', 'side': 'sell',
-                    'amount': amount, 'price': price, 'params': params_sell
-                })
+                orders.append({'symbol': self.symbol, 'type': 'limit', 'side': 'sell', 'amount': amount, 'price': price, 'params': base_params.copy()})
 
-            # 4. Envío optimizado
-            exchange_name = self._exchange_id.upper()
-            if self.exchange.has.get('createOrdersWs'):
-                response = await self.exchange.create_orders_ws(orders)
-                logger.info(f"✅ WS Batch ejecutado: {len(orders)} órdenes.")
-            elif self.exchange.has.get('createOrders'):
-                response = await self.exchange.create_orders(orders)
-                logger.info(f"✅ REST Batch ejecutado con éxito.")
-            else:
-                tasks = []
-                for o in orders:
-                    tasks.append(self.exchange.create_order(
-                        o['symbol'], o['type'], o['side'], o['amount'], o['price'], o['params']
-                    ))
-                response = await asyncio.gather(*tasks, return_exceptions=True)
-                logger.info(f"✅ REST Concurrente ejecutado.")
+            if self.exchange.has.get('createOrdersWs'): await self.exchange.create_orders_ws(orders)
+            else: await asyncio.gather(*[self.exchange.create_order(o['symbol'], o['type'], o['side'], o['amount'], o['price'], o['params']) for o in orders], return_exceptions=True)
 
             self.ultima_ejecucion_ts = time.time()
-            self.malla_modificada = True
+            logger.info(f"✅ Malla lista. Spacing dinámico: {self.grid_spacing_usd:.4f} USDT")
 
         except Exception as e:
             logger.error(f"Error crítico enviando órdenes: {e}")
-            raise
-
-    def evaluar_inactividad_velas(self, minutos: int = 20) -> bool:
-        if not self.running:
-            return False
-            
-        segundos_inactivos = time.time() - getattr(self, 'ultima_ejecucion_ts', time.time())
-        
-        if segundos_inactivos > (minutos * 60):
-            logger.info(f"⏳ [INACTIVIDAD] {minutos} min sin ejecuciones. Solicitando re-centrado dinámico del Grid.")
-            self.ultima_ejecucion_ts = time.time() 
-            return True
-            
-        return False
 
     async def _watch_orders_loop(self):
-        logger.info("Iniciando escucha de Fills de Órdenes (Canal Privado)...")
+        logger.info("⚡ Iniciando HFT Fills Listener...")
         while self.running:
             try:
                 orders = await self.exchange.watch_orders(self.symbol)
                 for order in orders:
                     order_id = order.get('id')
-                    status = order.get('status')
-                    
-                    # Filtro Anti-Spam: Solo procesar órdenes cerradas que no hayamos visto
-                    if status == 'closed' and order_id not in self.processed_orders:
+                    if order.get('status') == 'closed' and order_id not in self.processed_orders:
                         self.processed_orders.add(order_id)
                         
-                        filled_price = order.get('average') or order.get('price')
+                        filled_price = float(order.get('average') or order.get('price'))
                         side = order.get('side')
-                        amount = order.get('amount')
+                        amount = float(order.get('filled') or order.get('amount')) 
                         
-                        logger.info(f"✅ [FILL DETECTADO] Orden {side} ejecutada a {filled_price}. Reponiendo malla...")
+                        logger.info(f"✅ [FILL] {side.upper()} a {filled_price}. Lanzando Replenishment...")
                         self.ultima_ejecucion_ts = time.time()
                         
-                        # LÓGICA DE GRID CONTINUO (Replenishment)
-                        if side == 'buy':
-                            # Si compramos, colocamos Take Profit (Venta) un nivel arriba
-                            new_price = filled_price + self.grid_spacing_usd
-                            new_side = 'sell'
-                        else:
-                            # Si vendimos, colocamos Take Profit (Compra) un nivel abajo
-                            new_price = filled_price - self.grid_spacing_usd
-                            new_side = 'buy'
-                            
-                        new_price = float(self.exchange.price_to_precision(self.symbol, new_price))
+                        # 1. REPLENISHMENT INMEDIATO (Take Profit)
+                        new_side = 'sell' if side == 'buy' else 'buy'
+                        tp_price = filled_price + self.grid_spacing_usd if side == 'buy' else filled_price - self.grid_spacing_usd
+                        tp_price = float(self.exchange.price_to_precision(self.symbol, tp_price))
                         
-                        params = {}
-                        if self._exchange_id == 'okx':
-                            params['tdMode'] = 'cross'
-                            params['posSide'] = 'net'
-                        elif self._exchange_id == 'binance':
-                            params['positionSide'] = 'BOTH'
-                            
-                        try:
-                            await self.exchange.create_order(
-                                symbol=self.symbol,
-                                type='limit',
-                                side=new_side,
-                                amount=amount,
-                                price=new_price,
-                                params=params
-                            )
-                            logger.info(f"🔄 [GRID REPLENISH] Nueva orden {new_side} colocada a {new_price}")
-                        except Exception as e:
-                            logger.error(f"Error colocando orden de reposición: {e}")
+                        params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
+                        
+                        # Ejecución asíncrona sin await para no bloquear el loop de lectura
+                        asyncio.create_task(self._place_replenishment_order(new_side, amount, tp_price, params))
                             
             except Exception as e:
-                logger.error(f"Error en websocket (watch_orders): {e}")
-                await asyncio.sleep(5)
+                logger.error(f"Error en WS watch_orders: {e}")
+                await asyncio.sleep(2)
+
+    async def _place_replenishment_order(self, side, amount, price, params):
+        try:
+            await asyncio.sleep(0.2) # Micro-pausa para liberación de margen
+            await self.exchange.create_order(symbol=self.symbol, type='limit', side=side, amount=amount, price=price, params=params)
+            logger.info(f"🎯 [TP/REPLENISH] {side.upper()} colocada a {price}")
+        except Exception as e:
+            logger.warning(f"⚠️ Fallo PostOnly TP para {side} a {price}, reintentando como Limit normal: {e}")
+            try:
+                # Quitamos postOnly para garantizar que la orden entre
+                fallback_params = {k: v for k, v in params.items() if k != 'postOnly'}
+                await self.exchange.create_order(symbol=self.symbol, type='limit', side=side, amount=amount, price=price, params=fallback_params)
+                logger.info(f"🎯 [TP FALLBACK] {side.upper()} colocada a {price} (Normal Limit)")
+            except Exception as inner_e:
+                logger.error(f"❌ Error fatal colocando TP de fallback: {inner_e}")
 
     async def _watch_ohlcv_loop(self):
-        logger.info(f"Iniciando escucha de Velas para {self.symbol}...")
+        logger.info(f"📊 Iniciando monitor de Velas y Anti-Escape para {self.symbol}...")
         while self.running:
             try:
                 candles = await self.exchange.watch_ohlcv(self.symbol, self.timeframe)
@@ -455,48 +352,93 @@ class OkxWsClient:
                 
                 for ohlcv in candles:
                     ts = pd.to_datetime(ohlcv[0], unit='ms')
-                    new_row = {
-                        'timestamp': ts, 'open': ohlcv[1], 'high': ohlcv[2],
-                        'low': ohlcv[3], 'close': ohlcv[4], 'volume': ohlcv[5]
-                    }
+                    new_row = {'timestamp': ts, 'open': ohlcv[1], 'high': ohlcv[2], 'low': ohlcv[3], 'close': ohlcv[4], 'volume': ohlcv[5]}
                     
                     if len(self.df) > 0 and self.df.iloc[-1]['timestamp'] == ts:
-                        for key in new_row:
-                            self.df.loc[self.df.index[-1], key] = new_row[key]
+                        for key in new_row: self.df.loc[self.df.index[-1], key] = new_row[key]
                     else:
-                        new_df = pd.DataFrame([new_row])
-                        self.df = pd.concat([self.df, new_df], ignore_index=True)
-                        if len(self.df) > 100:
-                            self.df = self.df.iloc[1:]
+                        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
+                        if len(self.df) > 100: self.df = self.df.iloc[1:]
                         is_new_candle = True
                 
                 self.metrics["last_price"] = float(candles[-1][4])
                 
                 if is_new_candle:
-                    self.update_metrics()
-                    if self.evaluar_inactividad_velas(minutos=20):
-                        logger.info(f"🔄 [RESPIRACIÓN VIVO] Malla re-centrada para {self.symbol}")
-                        await self.setup_grid_orders()
+                    self.update_metrics() # Actualiza Keltner y recalcula grid_spacing_usd
+                    await self._check_grid_boundaries() # Lógica Anti-Escape
+                    
+                    # Purga de seguridad por volumen de operaciones
+                    if len(self.processed_orders) > 2000:
+                        logger.info("🧹 Purgando caché de órdenes procesadas (Límite 2000 alcanzado).")
+                        self.processed_orders.clear()
+
+                    # Inactividad Normal
+                    if time.time() - self.ultima_ejecucion_ts > (15 * 60):
+                        logger.info(f"⏳ [INACTIVIDAD] 15 min sin operaciones. Purgando memoria y re-evaluando malla...")
+                        self.processed_orders.clear() # Limpieza por inactividad
+                        await self._check_grid_boundaries(force_recenter=True)
+                        self.ultima_ejecucion_ts = time.time()
                     
             except Exception as e:
-                logger.error(f"Error en websocket (watch_ohlcv): {e}")
-                await asyncio.sleep(5)
+                logger.error(f"Error en WS watch_ohlcv: {e}")
+                await asyncio.sleep(2)
+
+    async def _check_grid_boundaries(self, force_recenter=False):
+        """ 🛡️ CONTINUOUS SHIFTING: Mantiene el precio siempre dentro de la malla """
+        try:
+            open_orders = await self.exchange.fetch_open_orders(self.symbol)
+            if not open_orders: return
+
+            buys = [o for o in open_orders if o['side'] == 'buy']
+            sells = [o for o in open_orders if o['side'] == 'sell']
+            current_price = self.metrics["last_price"]
+
+            # Si no hay órdenes de un lado, asumimos que el precio ya rompió la malla
+            highest_sell = max([o['price'] for o in sells]) if sells else (current_price - self.grid_spacing_usd)
+            lowest_buy = min([o['price'] for o in buys]) if buys else (current_price + self.grid_spacing_usd)
+
+            # 📈 Lógica Treadmill UP
+            if (current_price >= (highest_sell - self.grid_spacing_usd)) or force_recenter:
+                if buys: # Asegurarnos de que hay compras para reciclar
+                    furthest_buy = min(buys, key=lambda x: x['price'])
+                    logger.info(f"🔄 [SHIFT UP] Moviendo compra lejana de {furthest_buy['price']} hacia arriba.")
+                    await self.exchange.cancel_order(furthest_buy['id'], self.symbol)
+                    
+                    highest_current_buy = max([o['price'] for o in buys])
+                    new_price = float(self.exchange.price_to_precision(self.symbol, highest_current_buy + self.grid_spacing_usd))
+                    
+                    params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
+                    await asyncio.sleep(0.1) # Breve pausa por rate limits
+                    await self.exchange.create_order(self.symbol, 'limit', 'sell', furthest_buy['amount'], new_price, params)
+
+            # 📉 Lógica Treadmill DOWN
+            elif (current_price <= (lowest_buy + self.grid_spacing_usd)) or force_recenter:
+                if sells: # Asegurarnos de que hay ventas para reciclar
+                    furthest_sell = max(sells, key=lambda x: x['price'])
+                    logger.info(f"🔄 [SHIFT DOWN] Moviendo venta lejana de {furthest_sell['price']} hacia abajo.")
+                    await self.exchange.cancel_order(furthest_sell['id'], self.symbol)
+                    
+                    lowest_current_sell = min([o['price'] for o in sells])
+                    new_price = float(self.exchange.price_to_precision(self.symbol, lowest_current_sell - self.grid_spacing_usd))
+                    
+                    params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
+                    await asyncio.sleep(0.1) # Breve pausa por rate limits
+                    await self.exchange.create_order(self.symbol, 'limit', 'buy', furthest_sell['amount'], new_price, params)
+
+        except Exception as e:
+            logger.error(f"Error en Continuous Shifting: {e}")
 
     async def start(self):
         self.running = True
         self.metrics["status"] = "Running"
-        
         await self.exchange.load_markets()
         
         if "/" not in self.symbol and "USDT" in self.symbol:
-            base = self.symbol.replace("USDT", "")
-            base = base.split(":")[0] 
+            base = self.symbol.replace("USDT", "").split(":")[0] 
             self.symbol = f"{base}/USDT:USDT"
-            logger.info(f"Símbolo auto-corregido a formato CCXT: {self.symbol}")
 
         if self.symbol not in self.exchange.markets:
-            available_swaps = [k for k, v in self.exchange.markets.items() if v.get('swap')]
-            logger.error(f"⛔ ERROR: El mercado {self.symbol} NO EXISTE en los SWAPS de OKX.")
+            logger.error(f"⛔ ERROR: El mercado {self.symbol} NO EXISTE en los SWAPS.")
             self.running = False
             self.metrics["status"] = "Error - Invalid Symbol"
             await self.exchange.close()
@@ -505,10 +447,8 @@ class OkxWsClient:
         try:
             balance = await self.exchange.fetch_balance()
             usdt_balance = float(balance.get('USDT', {}).get('free', 0.0))
-            logger.info(f"Balance de la cuenta OKX: {usdt_balance:.2f} USDT")
-            
             if self.base_capital > usdt_balance:
-                logger.error(f"Inversión requerida ({self.base_capital} USDT) es mayor al balance libre ({usdt_balance} USDT). Deteniendo bot.")
+                logger.error(f"Inversión requerida ({self.base_capital}) > balance libre ({usdt_balance}).")
                 self.running = False
                 await self.exchange.close()
                 return
@@ -518,13 +458,12 @@ class OkxWsClient:
         await self.fetch_historical_candles()
 
         if self.resume_existing_grid:
-            logger.info(f"Reanudando monitoreo de grid existente en OKX para {self.symbol}")
+            logger.info(f"Reanudando monitoreo para {self.symbol}")
             self.ultima_ejecucion_ts = time.time()
-            # Calcular spacing en caso de reanudación
-            grid_spacing_factor = float(self.ai_recommendation.get('grid_spacing_factor', 0.5)) / 100.0
-            self.grid_spacing_usd = self.metrics['last_price'] * grid_spacing_factor
+            self.update_metrics()
         else:
             await self.setup_grid_orders()
         
         self._ohlcv_task = asyncio.create_task(self._watch_ohlcv_loop())
         self._orders_task = asyncio.create_task(self._watch_orders_loop())
+        await asyncio.gather(self._ohlcv_task, self._orders_task, return_exceptions=True)

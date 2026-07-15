@@ -1135,7 +1135,6 @@ export default function App() {
               </Panel>
             </>
           )}
-          )}
         </ScrollView>
       )}
 

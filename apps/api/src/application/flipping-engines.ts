@@ -367,20 +367,23 @@ export class RealEstateEngineService {
       const firecrawlCred = await this.vault.getDecryptedProvider(userId, "firecrawl");
       const openrouterCred = await this.vault.getDecryptedProvider(userId, "openrouter");
 
-      if (!firecrawlCred?.payload?.apiKey || !openrouterCred?.payload?.apiKey) {
+      const firecrawlKey = firecrawlCred?.payload?.apiKey || process.env.FIRECRAWL_API_KEY;
+      const openrouterKey = openrouterCred?.payload?.apiKey || process.env.OPENROUTER_API_KEY;
+
+      if (!firecrawlKey || !openrouterKey) {
         await this.engineStatusRepo.save({
           userId,
           motor: "real-estate",
           enabled: true,
           lastRunAt: new Date().toISOString(),
-          lastError: "Faltan credenciales de Firecrawl o OpenRouter en la bóveda.",
+          lastError: "Faltan credenciales de Firecrawl o OpenRouter en la bóveda o en .env.",
         });
         return;
       }
 
       const pages = await this.scraper.crawl({
         url: cfg.targetUrl,
-        apiKey: firecrawlCred.payload.apiKey,
+        apiKey: firecrawlKey,
         limit: 1,
       });
 
@@ -388,7 +391,7 @@ export class RealEstateEngineService {
       if (!pageContent) return;
 
       const llmResponse = await this.llm.chat({
-        apiKey: openrouterCred.payload.apiKey,
+        apiKey: openrouterKey,
         model: "openai/gpt-4o-mini",
         messages: [
           {
