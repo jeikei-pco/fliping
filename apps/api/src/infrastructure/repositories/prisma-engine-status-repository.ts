@@ -26,16 +26,6 @@ export class PrismaEngineStatusRepository implements EngineStatusRepository {
     lastError?: string;
     config?: string;
   }): Promise<EngineStatusRecord> {
-    await this.prisma.appUser.upsert({
-      where: { id: input.userId },
-      update: {},
-      create: {
-        id: input.userId,
-        displayName: input.userId === "demo-user" ? "JK Operator" : input.userId,
-        email: `${input.userId}@jk-flipping.local`,
-      },
-    });
-
     const record = await this.prisma.engineStatus.upsert({
       where: { userId_motor: { userId: input.userId, motor: input.motor } },
       update: {

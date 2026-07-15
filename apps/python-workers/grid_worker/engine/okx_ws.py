@@ -23,12 +23,18 @@ def _create_okx_exchange(api_key, secret, passphrase, sandbox=True):
         },
         'options': {
             'defaultType': 'swap',
-            'fetchMarkets': ['swap']
+            'fetchMarkets': ['swap'],
+            'sandboxMode': sandbox,
         }
     })
 
     if sandbox:
         exchange.set_sandbox_mode(True)
+        # Forzar endpoints de websocket para evitar ambigüedades
+        exchange.urls['api']['ws'] = {
+            'public': 'wss://wspap.okx.com:8443/ws/v5/public',
+            'private': 'wss://wspap.okx.com:8443/ws/v5/private'
+        }
 
     patch_ccxt_resolver(exchange)
     return exchange
@@ -249,7 +255,7 @@ class OkxWsClient:
 
     async def setup_grid_orders(self):
         try:
-            # 1. Limpieza inicial (Cancelación de órdenes que no sean Take Profits)
+            # 1. Limpieza inicial de órdenes que no sean Take Profits
             logger.info(f"Cancelando órdenes abiertas para {self.symbol}...")
             try:
                 open_orders = await self.exchange.fetch_open_orders(self.symbol)
@@ -259,21 +265,20 @@ class OkxWsClient:
             except Exception as e:
                 logger.warning(f"Error gestionando órdenes previas: {e}")
 
-            # 2. Configuración Dinámica de la Malla (Basado en IA)
+            # 2. Configuración Dinámica de la Malla
             leverage = float(self.ai_recommendation.get('leverage', 10.0))
             await self.exchange.set_leverage(leverage, self.symbol)
 
-            # grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
+            # Cálculo de líneas y simetría
+            grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
+            if grid_lines % 2 != 0: grid_lines += 1 # Asegurar paridad
             
-            # MODO PRUEBA: Forzar a 2 líneas (1 Buy, 1 Sell) para probar creación, aplica para demo y real
-            grid_lines = 2
-                
             buy_lines = grid_lines // 2
             sell_lines = grid_lines // 2
             
             grid_spacing_factor = float(self.ai_recommendation.get('grid_spacing_factor', 0.5)) / 100.0
             
-            # Inversión dividida por el número de líneas total y apalancada
+            # Inversión
             effective_investment = self.base_capital * leverage
             usd_per_line = effective_investment / grid_lines
 
@@ -288,62 +293,47 @@ class OkxWsClient:
             orders = []
             logger.info(f"Grid Dinámico: {grid_lines} líneas -> {buy_lines} Buy | {sell_lines} Sell | Leverage: x{leverage}")
 
-            # Cálculo de cantidad (asegurando precisión del exchange y lotes mínimos)
             raw_amount = (usd_per_line / current_price) / contract_size
             amount = float(self.exchange.amount_to_precision(self.symbol, raw_amount))
             amount = max(amount, float(market['limits']['amount']['min'] or 1.0))
 
-            # OKX requiere especificar el modo de posición (tdMode) y la dirección (posSide) para contratos SWAP
-            # tdMode: 'cross' (cruzado) o 'isolated' (aislado)
-            base_params = {
-                'tdMode': 'cross'
-            }
+            base_params = {'tdMode': 'cross'}
 
-            # Matriz de órdenes temporal: SOLO UNA ORDEN DE PRUEBA (Long) según solicitud del usuario
-            price = float(self.exchange.price_to_precision(self.symbol, current_price - spacing))
-            params_buy = base_params.copy()
-            params_buy['posSide'] = 'long'
+            # Órdenes de Compra
+            for i in range(1, buy_lines + 1):
+                price = float(self.exchange.price_to_precision(self.symbol, current_price - (i * spacing)))
+                params_buy = base_params.copy()
+                params_buy['posSide'] = 'long'
+                orders.append({
+                    'symbol': self.symbol, 'type': 'limit', 'side': 'buy',
+                    'amount': amount, 'price': price, 'params': params_buy
+                })
             
-            orders.append({
-                'symbol': self.symbol, 
-                'type': 'limit', 
-                'side': 'buy',
-                'amount': amount, 
-                'price': price,
-                'params': params_buy
-            })
-            logger.info(f"Modo de prueba: Creando SOLO UNA orden limit en {price} (Long)")
+            # Órdenes de Venta
+            for i in range(1, sell_lines + 1):
+                price = float(self.exchange.price_to_precision(self.symbol, current_price + (i * spacing)))
+                params_sell = base_params.copy()
+                params_sell['posSide'] = 'short'
+                orders.append({
+                    'symbol': self.symbol, 'type': 'limit', 'side': 'sell',
+                    'amount': amount, 'price': price, 'params': params_sell
+                })
 
-            # 4. Envío Atómico (Batch) o WS
-            try:
-                # Intentar enviar por canal privado WS si está disponible
-                if self.exchange.has.get('createOrdersWs'):
-                    logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX por CANAL PRIVADO (WS Batch)...")
-                    response = await self.exchange.create_orders_ws(orders)
-                    logger.info(f"✅ Bloque ejecutado exitosamente vía WS. Detalles: {response}")
-                elif self.exchange.has.get('createOrderWs'):
-                    logger.info(f"Transmitiendo {len(orders)} órdenes a OKX por CANAL PRIVADO (WS Individual)...")
-                    for o in orders:
-                        await self.exchange.create_order_ws(
-                            symbol=o['symbol'], type=o['type'], side=o['side'],
-                            amount=o['amount'], price=o['price'], params=o['params']
-                        )
-                    logger.info(f"✅ Órdenes enviadas exitosamente vía WS individual.")
-                elif self.exchange.has.get('createOrders'):
-                    logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX (REST API)...")
-                    response = await self.exchange.create_orders(orders)
-                    logger.info(f"✅ Bloque ejecutado exitosamente vía REST. Se crearon {len(response)} órdenes.")
-                else:
-                    raise Exception("El exchange no soporta creación de órdenes.")
-            except Exception as ex:
-                logger.error(f"❌ Falló la creación de órdenes: {ex}")
-                raise
+            # 4. Envío optimizado vía WebSocket (Canal Privado)
+            if self.exchange.has.get('createOrdersWs'):
+                logger.info(f"Transmitiendo {len(orders)} órdenes a OKX vía WS Batch...")
+                response = await self.exchange.create_orders_ws(orders)
+                logger.info(f"✅ WS Batch ejecutado: {response}")
+            else:
+                # Si el exchange no soporta WS, lanzamos error explícito para no degradar a REST
+                raise Exception("WebSocket no disponible para creación masiva")
 
             self.ultima_ejecucion_ts = time.time()
             self.malla_modificada = True
 
         except Exception as e:
-            logger.error(f"Error al configurar órdenes del grid: {e}")
+            logger.error(f"Error crítico enviando órdenes: {e}")
+            raise
 
     def evaluar_inactividad_velas(self, minutos: int = 20) -> bool:
         """Regla de las 4 Velas (5m * 4 = 20 min). Si no hay operaciones, desliza el grid."""

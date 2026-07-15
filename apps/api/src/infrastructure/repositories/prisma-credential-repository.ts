@@ -9,21 +9,6 @@ export class PrismaCredentialRepository implements CredentialRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
   async save(input: SaveCredentialInput, encryptedPayload: string): Promise<CredentialRecord> {
-    await this.prisma.appUser.upsert({
-      where: {
-        id: input.userId,
-      },
-      update: {
-        displayName: this.inferDisplayName(input.userId),
-        email: this.inferEmail(input.userId),
-      },
-      create: {
-        id: input.userId,
-        displayName: this.inferDisplayName(input.userId),
-        email: this.inferEmail(input.userId),
-      },
-    });
-
     const credential = await this.prisma.credential.upsert({
       where: {
         userId_provider: {

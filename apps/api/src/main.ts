@@ -147,8 +147,8 @@ const bootstrap = async () => {
     }, 3000); // Dar 3 segundos para que Python levante BullMQ
   }
 
-  const server = app.listen(port, () => {
-    console.log(`JK-Flipping API escuchando en http://localhost:${port}`);
+  const server = app.listen(port, '::', () => {
+    console.log(`JK-Flipping API escuchando en http://[::]:${port}`);
     console.log(`  Sprints 3 & 4 activados: Motor Tech, Inmobiliario, Micro-SaaS`);
     console.log(`  Worker de Python: Gestionado por Node`);
   });

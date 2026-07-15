@@ -10,7 +10,7 @@ logger = logging.getLogger("GridWorker.Screener")
 
 async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timeframe="5m", limit=288):
     """
-    Escanea todos los mercados Swap USDT en OKX.
+    Escanea todos los mercados Swap USDT en OKX DIRECTAMENTE DESDE EL EXCHANGE.
     limit=288 representa 24 horas en velas de 5 minutos.
     Devuelve el Top 20 de símbolos con menor CV (más constantes) o mejor amplitud.
     """
@@ -37,24 +37,27 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
     patch_ccxt_resolver(exchange)
         
     try:
+        # 1. SIEMPRE DESCARGAR DESDE EL EXCHANGE (Ignora cualquier caché/DB)
         try:
             await exchange.load_markets()
         except Exception as e:
-           # _check_okx_51155(e)
             logger.error(f"Fallo al cargar mercados en el Screener: {e}")
             return []
         
-        # Filtrar mercados: solo futuros lineales (Swap USDT) que estén activos
+        # 2. FILTRO TRIPLE ESTRICTO PARA OKX
         symbols = []
         for symbol, market in exchange.markets.items():
-            # Validación estricta para OKX Swap USDT
-            if market.get('swap')  and market.get('active'):
+            is_swap = market.get('swap') == True
+            is_active = market.get('active') == True
+            is_usdt_settled = market.get('settle') == 'USDT'
+            
+            # Solo agregamos si cumple las 3 condiciones vitales
+            if is_swap and is_active and is_usdt_settled:
                 symbols.append(symbol)
                 
-        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT en {modo_str}.")
+        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT 100% operables en {modo_str}.")
         
-        # Para pruebas o sandbox, podríamos no tener demasiados. 
-        # Vamos a escanearlos en lotes para no saturar el Rate Limit.
+        # 3. Escaneo por lotes
         batch_size = 10
         results = []
         
@@ -72,20 +75,16 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
                     results.append(res)
                     
             logger.info(f"Progreso Screener: {min(i+batch_size, len(symbols))}/{len(symbols)}")
-            await asyncio.sleep(0.5) # Pausa por rate limits
+            await asyncio.sleep(0.5) 
             
-        # Pasamos todos los símbolos (sin filtro de avg_body_pct)
         logger.info(f"Símbolos escaneados: {len(results)}")
         valid_results = results
         logger.info(f"Símbolos válidos (avg_body_pct >= 0.20): {len(valid_results)}")
 
-        # 2. Ordenamos de MAYOR a MENOR cuerpo promedio (reverse=True)
-        # Esto garantiza que el Top 1 sea el activo con velas más grandes y rentables.
+        # 4. Ordenamiento
         valid_results.sort(key=lambda x: x.get('avg_body_pct', 0), reverse=True)
-        
         valid_symbols = valid_results
         
-        valid_symbols_names = [r['symbol'] for r in valid_symbols]
         logger.info(f"Screener terminado. {len(valid_symbols)} seleccionados (todos los válidos).")
         
         return valid_symbols
