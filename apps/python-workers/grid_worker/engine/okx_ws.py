@@ -262,11 +262,10 @@ class OkxWsClient:
             leverage = float(self.ai_recommendation.get('leverage', 10.0))
             await self.exchange.set_leverage(leverage, self.symbol)
 
-            grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
+            # grid_lines = int(self.ai_recommendation.get('grid_lines', 10))
             
-            # Asegurar que el número de líneas sea par para mantener simetría perfecta
-            if grid_lines % 2 != 0:
-                grid_lines += 1
+            # MODO PRUEBA: Forzar a 2 líneas (1 Buy, 1 Sell) para probar creación, aplica para demo y real
+            grid_lines = 2
                 
             buy_lines = grid_lines // 2
             sell_lines = grid_lines // 2
@@ -310,9 +309,13 @@ class OkxWsClient:
 
             # 4. Envío Atómico (Batch)
             if self.exchange.has['createOrders']:
-                logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX...")
-                await self.exchange.create_orders(orders)
-                logger.info("✅ Bloque ejecutado exitosamente.")
+                logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX (Modo: {self.metrics['exchange_mode']})...")
+                try:
+                    response = await self.exchange.create_orders(orders)
+                    logger.info(f"✅ Bloque ejecutado exitosamente. Se crearon {len(response)} órdenes. Detalles: {response}")
+                except Exception as ex:
+                    logger.error(f"❌ Falló la creación de órdenes: {ex}")
+                    raise
             else:
                 raise Exception("El exchange no soporta Batch Orders")
 

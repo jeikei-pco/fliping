@@ -1,4 +1,8 @@
 import ccxt from "ccxt";
+import dns from "node:dns";
+
+// Forzar el uso de IPv4 primero a nivel global en Node.js para evitar bloqueos por IPv6
+dns.setDefaultResultOrder("ipv4first");
 
 import type { ExchangeBalances } from "../../domain/model.js";
 import type { ExchangePort } from "../../domain/ports.js";
