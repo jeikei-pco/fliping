@@ -140,7 +140,7 @@ const defaultFlippingEngines: FlippingEngineStatus[] = [
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("login");
-  const [apiBaseUrl, setApiBaseUrl] = useState("http://[2800:484:a480:9b50:bc18:4d55:828:5436]:4000");
+  const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:4000");
   const [email, setEmail] = useState("operator@jk.local");
   const [password, setPassword] = useState("123456");
   const [userLabel, setUserLabel] = useState("JK Operator");

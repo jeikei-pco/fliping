@@ -298,7 +298,7 @@ class OkxWsClient:
             logger.error(f"Error crítico enviando órdenes: {e}")
 
     async def _watch_orders_loop(self):
-        logger.info("⚡ Iniciando HFT Fills Listener...")
+        logger.info("⚡ Iniciando HFT Fills Listener (Ciclo Apertura/Cierre)...")
         while self.running:
             try:
                 orders = await self.exchange.watch_orders(self.symbol)
@@ -310,19 +310,30 @@ class OkxWsClient:
                         filled_price = float(order.get('average') or order.get('price'))
                         side = order.get('side')
                         amount = float(order.get('filled') or order.get('amount')) 
+                        is_reduce_only = _is_reduce_only_order(order)
                         
-                        logger.info(f"✅ [FILL] {side.upper()} a {filled_price}. Lanzando Replenishment...")
                         self.ultima_ejecucion_ts = time.time()
                         
-                        # 1. REPLENISHMENT INMEDIATO (Take Profit)
-                        new_side = 'sell' if side == 'buy' else 'buy'
-                        tp_price = filled_price + self.grid_spacing_usd if side == 'buy' else filled_price - self.grid_spacing_usd
-                        tp_price = float(self.exchange.price_to_precision(self.symbol, tp_price))
+                        if not is_reduce_only:
+                            # 🟢 1. SE LLENÓ APERTURA -> Colocamos Take Profit (Reduce Only)
+                            logger.info(f"✅ [APERTURA] {side.upper()} a {filled_price}. Lanzando TP (Reduce Only)...")
+                            new_side = 'sell' if side == 'buy' else 'buy'
+                            tp_price = filled_price + self.grid_spacing_usd if side == 'buy' else filled_price - self.grid_spacing_usd
+                            tp_price = float(self.exchange.price_to_precision(self.symbol, tp_price))
+                            
+                            params = {'tdMode': 'cross', 'posSide': 'net', 'reduceOnly': True}
+                            asyncio.create_task(self._place_replenishment_order(new_side, amount, tp_price, params, "TAKE PROFIT"))
                         
-                        params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
-                        
-                        # Ejecución asíncrona sin await para no bloquear el loop de lectura
-                        asyncio.create_task(self._place_replenishment_order(new_side, amount, tp_price, params))
+                        else:
+                            # 🔴 2. SE LLENÓ TAKE PROFIT -> Restauramos la malla original (Post Only)
+                            logger.info(f"💰 [TAKE PROFIT] {side.upper()} a {filled_price}. Restaurando malla (Post Only)...")
+                            new_side = 'sell' if side == 'buy' else 'buy'
+                            # Calculamos el precio original de donde vino esta operación
+                            grid_price = filled_price - self.grid_spacing_usd if side == 'sell' else filled_price + self.grid_spacing_usd
+                            grid_price = float(self.exchange.price_to_precision(self.symbol, grid_price))
+                            
+                            params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
+                            asyncio.create_task(self._place_replenishment_order(new_side, amount, grid_price, params, "RESTAURAR GRID"))
                             
             except Exception as e:
                 logger.error(f"Error en WS watch_orders: {e}")
@@ -384,22 +395,24 @@ class OkxWsClient:
                 await asyncio.sleep(2)
 
     async def _check_grid_boundaries(self, force_recenter=False):
-        """ 🛡️ CONTINUOUS SHIFTING: Mantiene el precio siempre dentro de la malla """
+        """ 🛡️ CONTINUOUS SHIFTING: Mueve solo las órdenes base (PostOnly), ignora los TPs (ReduceOnly) """
         try:
             open_orders = await self.exchange.fetch_open_orders(self.symbol)
             if not open_orders: return
 
-            buys = [o for o in open_orders if o['side'] == 'buy']
-            sells = [o for o in open_orders if o['side'] == 'sell']
+            # ⚠️ Filtramos para mover SOLO las órdenes de la malla, no los Take Profits
+            grid_orders = [o for o in open_orders if not _is_reduce_only_order(o)]
+            
+            buys = [o for o in grid_orders if o['side'] == 'buy']
+            sells = [o for o in grid_orders if o['side'] == 'sell']
             current_price = self.metrics["last_price"]
 
-            # Si no hay órdenes de un lado, asumimos que el precio ya rompió la malla
             highest_sell = max([o['price'] for o in sells]) if sells else (current_price - self.grid_spacing_usd)
             lowest_buy = min([o['price'] for o in buys]) if buys else (current_price + self.grid_spacing_usd)
 
             # 📈 Lógica Treadmill UP
             if (current_price >= (highest_sell - self.grid_spacing_usd)) or force_recenter:
-                if buys: # Asegurarnos de que hay compras para reciclar
+                if buys: 
                     furthest_buy = min(buys, key=lambda x: x['price'])
                     logger.info(f"🔄 [SHIFT UP] Moviendo compra lejana de {furthest_buy['price']} hacia arriba.")
                     await self.exchange.cancel_order(furthest_buy['id'], self.symbol)
@@ -408,12 +421,12 @@ class OkxWsClient:
                     new_price = float(self.exchange.price_to_precision(self.symbol, highest_current_buy + self.grid_spacing_usd))
                     
                     params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
-                    await asyncio.sleep(0.1) # Breve pausa por rate limits
+                    await asyncio.sleep(0.1) 
                     await self.exchange.create_order(self.symbol, 'limit', 'sell', furthest_buy['amount'], new_price, params)
 
             # 📉 Lógica Treadmill DOWN
             elif (current_price <= (lowest_buy + self.grid_spacing_usd)) or force_recenter:
-                if sells: # Asegurarnos de que hay ventas para reciclar
+                if sells: 
                     furthest_sell = max(sells, key=lambda x: x['price'])
                     logger.info(f"🔄 [SHIFT DOWN] Moviendo venta lejana de {furthest_sell['price']} hacia abajo.")
                     await self.exchange.cancel_order(furthest_sell['id'], self.symbol)
@@ -422,11 +435,12 @@ class OkxWsClient:
                     new_price = float(self.exchange.price_to_precision(self.symbol, lowest_current_sell - self.grid_spacing_usd))
                     
                     params = {'tdMode': 'cross', 'posSide': 'net', 'postOnly': True}
-                    await asyncio.sleep(0.1) # Breve pausa por rate limits
+                    await asyncio.sleep(0.1) 
                     await self.exchange.create_order(self.symbol, 'limit', 'buy', furthest_sell['amount'], new_price, params)
 
         except Exception as e:
             logger.error(f"Error en Continuous Shifting: {e}")
+
 
     async def start(self):
         self.running = True
