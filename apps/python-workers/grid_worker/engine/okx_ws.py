@@ -158,7 +158,7 @@ class OkxWsClient:
     ):
         self.exchange = controller.get_instance()
         self._exchange_id = self.exchange.id
-        self._sandbox = self.exchange.options.get('sandboxMode', False)
+        self._sandbox = self.exchange.options.get('sandboxMode', True)
 
         self.symbol = symbol
         logger.info(f"Symbol -> {symbol}")
