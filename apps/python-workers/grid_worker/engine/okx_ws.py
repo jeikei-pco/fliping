@@ -185,6 +185,7 @@ class OkxWsClient:
         self._sandbox = sandbox
 
         self.symbol = symbol
+        logger.info("Symbol -> %s", symbol)
         self.timeframe = timeframe
         self.running = False
         self.base_capital = base_capital
@@ -292,32 +293,51 @@ class OkxWsClient:
             amount = float(self.exchange.amount_to_precision(self.symbol, raw_amount))
             amount = max(amount, float(market['limits']['amount']['min'] or 1.0))
 
-            # Matriz de órdenes (Symmetric Buy/Sell)
-            for i in range(1, buy_lines + 1):
-                price = float(self.exchange.price_to_precision(self.symbol, current_price - (i * spacing)))
-                orders.append({
-                    'symbol': self.symbol, 'type': 'limit', 'side': 'buy',
-                    'amount': amount, 'price': price
-                })
-                
-            for i in range(1, sell_lines + 1):
-                price = float(self.exchange.price_to_precision(self.symbol, current_price + (i * spacing)))
-                orders.append({
-                    'symbol': self.symbol, 'type': 'limit', 'side': 'sell',
-                    'amount': amount, 'price': price
-                })
+            # OKX requiere especificar el modo de posición (tdMode) y la dirección (posSide) para contratos SWAP
+            # tdMode: 'cross' (cruzado) o 'isolated' (aislado)
+            base_params = {
+                'tdMode': 'cross'
+            }
 
-            # 4. Envío Atómico (Batch)
-            if self.exchange.has['createOrders']:
-                logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX (Modo: {self.metrics['exchange_mode']})...")
-                try:
+            # Matriz de órdenes temporal: SOLO UNA ORDEN DE PRUEBA (Long) según solicitud del usuario
+            price = float(self.exchange.price_to_precision(self.symbol, current_price - spacing))
+            params_buy = base_params.copy()
+            params_buy['posSide'] = 'long'
+            
+            orders.append({
+                'symbol': self.symbol, 
+                'type': 'limit', 
+                'side': 'buy',
+                'amount': amount, 
+                'price': price,
+                'params': params_buy
+            })
+            logger.info(f"Modo de prueba: Creando SOLO UNA orden limit en {price} (Long)")
+
+            # 4. Envío Atómico (Batch) o WS
+            try:
+                # Intentar enviar por canal privado WS si está disponible
+                if self.exchange.has.get('createOrdersWs'):
+                    logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX por CANAL PRIVADO (WS Batch)...")
+                    response = await self.exchange.create_orders_ws(orders)
+                    logger.info(f"✅ Bloque ejecutado exitosamente vía WS. Detalles: {response}")
+                elif self.exchange.has.get('createOrderWs'):
+                    logger.info(f"Transmitiendo {len(orders)} órdenes a OKX por CANAL PRIVADO (WS Individual)...")
+                    for o in orders:
+                        await self.exchange.create_order_ws(
+                            symbol=o['symbol'], type=o['type'], side=o['side'],
+                            amount=o['amount'], price=o['price'], params=o['params']
+                        )
+                    logger.info(f"✅ Órdenes enviadas exitosamente vía WS individual.")
+                elif self.exchange.has.get('createOrders'):
+                    logger.info(f"Transmitiendo bloque masivo de {len(orders)} órdenes a OKX (REST API)...")
                     response = await self.exchange.create_orders(orders)
-                    logger.info(f"✅ Bloque ejecutado exitosamente. Se crearon {len(response)} órdenes. Detalles: {response}")
-                except Exception as ex:
-                    logger.error(f"❌ Falló la creación de órdenes: {ex}")
-                    raise
-            else:
-                raise Exception("El exchange no soporta Batch Orders")
+                    logger.info(f"✅ Bloque ejecutado exitosamente vía REST. Se crearon {len(response)} órdenes.")
+                else:
+                    raise Exception("El exchange no soporta creación de órdenes.")
+            except Exception as ex:
+                logger.error(f"❌ Falló la creación de órdenes: {ex}")
+                raise
 
             self.ultima_ejecucion_ts = time.time()
             self.malla_modificada = True
@@ -405,14 +425,51 @@ class OkxWsClient:
                 logger.error(f"Error en websocket (watch_ohlcv): {e}")
                 await asyncio.sleep(5)
 
+    
     async def start(self):
         self.running = True
         self.metrics["status"] = "Running"
         
+        # 1. Cargar mercados y validar si el símbolo existe en OKX
+        await self.exchange.load_markets()
+        
+        # REEMPLAZA LA LÓGICA ANTERIOR POR ESTO:
+        # Asegurarnos de que el formato sea estrictamente el de CCXT para SWAPS (con barra)
+        if "/" not in self.symbol and "USDT" in self.symbol:
+            base = self.symbol.replace("USDT", "")
+            # Limpiar por si trae los dos puntos pegados
+            base = base.split(":")[0] 
+            self.symbol = f"{base}/USDT:USDT"
+            logger.info(f"Símbolo auto-corregido a formato CCXT: {self.symbol}")
+
+        if self.symbol not in self.exchange.markets:
+            available_swaps = [k for k, v in self.exchange.markets.items() if v.get('swap')]
+            logger.error(f"⛔ ERROR: El mercado {self.symbol} NO EXISTE en los SWAPS de OKX.")
+            logger.error(f"Futuros disponibles en OKX (Mostrando 20): {', '.join(available_swaps[:20])}...")
+            self.running = False
+            self.metrics["status"] = "Error - Invalid Symbol"
+            await self.exchange.close()
+            return  # Salimos de la función sin iniciar los bucles
+
+        # 2. Obtener el balance de la cuenta y validarlo
+        try:
+            balance = await self.exchange.fetch_balance()
+            usdt_balance = float(balance.get('USDT', {}).get('free', 0.0))
+            logger.info(f"Balance de la cuenta OKX: {usdt_balance:.2f} USDT")
+            
+            if self.base_capital > usdt_balance:
+                logger.error(f"Inversión requerida ({self.base_capital} USDT) es mayor al balance libre ({usdt_balance} USDT). Deteniendo bot.")
+                self.running = False
+                await self.exchange.close()
+                return
+        except Exception as e:
+            logger.warning(f"No se pudo obtener el balance: {e}")
+
+        # 3. Si el mercado existe y hay balance, continuamos normalmente
         await self.fetch_historical_candles()
 
         if self.resume_existing_grid:
-            logger.info(f"Reanudando monitoreo de grid existente en OKX para {self.symbol} sin recrear órdenes.")
+            logger.info(f"Reanudando monitoreo de grid existente en OKX para {self.symbol}")
             self.ultima_ejecucion_ts = time.time()
         else:
             await self.setup_grid_orders()
@@ -421,8 +478,6 @@ class OkxWsClient:
         self._orders_task = asyncio.create_task(self._watch_orders_loop())
         
         await asyncio.gather(self._ohlcv_task, self._orders_task, return_exceptions=True)
-                
-    async def stop(self):
         self.running = False
         self.metrics["status"] = "Stopped"
         logger.info("Deteniendo OKX Websocket...")
@@ -430,4 +485,3 @@ class OkxWsClient:
             self._ohlcv_task.cancel()
         if hasattr(self, '_orders_task') and not self._orders_task.done():
             self._orders_task.cancel()
-        await self.exchange.close()

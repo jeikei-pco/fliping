@@ -126,46 +126,57 @@ async def watchdog_loop(api_key, secret, passphrase, sandbox):
                 current_task_name = "Screener"
                 logger.info("No hay grid activo. Iniciando escaneo global y backtest automático...")
 
-                top_20 = await scan_all_usdt_futures(api_key, secret, passphrase, sandbox)
-                if top_20:
-                    if redis_client:
-                        await redis_client.set("grid:top20", json.dumps(top_20))
-
-                    # --- AI Optimizer: batches de 5 símbolos, máx. 3 en paralelo ---
-                    current_task_name = "AI Optimizer (batches)"
-                    logger.info(f"Optimizando {len(top_20)} símbolos con IA (batches de 5, Semaphore=3)...")
-
-                    semaphore = asyncio.Semaphore(3)
-
-                    async def optimize_batch(batch):
-                        async with semaphore:
-                            return await get_ai_grid_params_batch(batch, user_config)
-
-                    # Dividir top_20 en grupos de 5 → hasta 4 batches
-                    batches = [top_20[i:i+5] for i in range(0, len(top_20), 5)]
-                    batch_results = await asyncio.gather(*[optimize_batch(b) for b in batches])
-
-                    # Merge: construir mapa { symbol: ai_params } y asignar a cada symbol_data
-                    ai_params_map = {}
-                    for batch_result in batch_results:
-                        ai_params_map.update(batch_result)
+                all_symbols = await scan_all_usdt_futures(api_key, secret, passphrase, sandbox)
+                if all_symbols:
+                    
+                    from engine.optimizer_integrator import optimize_grid_params
+                    
+                    current_task_name = "Optimizador (Heurístico)"
+                    logger.info(f"Optimizando {len(all_symbols)} símbolos rápidamente con integrador heurístico...")
 
                     optimized_targets = []
-                    for symbol_data in top_20:
-                        symbol_data['ai_params'] = ai_params_map.get(symbol_data['symbol'], {})
-                        optimized_targets.append(symbol_data)
+                    for sym_data in all_symbols:
+                        # Asignar directamente usando el fallback matemático
+                        sym_data['ai_params'] = optimize_grid_params(None, sym_data)
+                        optimized_targets.append(sym_data)
 
-                    logger.info(f"IA completada. {len(ai_params_map)} símbolos optimizados.")
+                    logger.info(f"Optimización completada. {len(optimized_targets)} símbolos listos para backtest.")
 
-                    # --- Backtest con parámetros IA reales ---
-                    current_task_name = "Backtest (Optimizado)"
+                    # --- Backtest masivo ---
+                    current_task_name = "Backtest (Masivo)"
                     results = await run_vectorized_backtest(
                         api_key, secret, passphrase, optimized_targets, sandbox, base_capital, max_leverage
                     )
-                    logger.info(f"Backtest terminado. Resultados: {len(results)}")
+                    logger.info(f"Backtest terminado en {len(results)} símbolos.")
 
                     if results and len(results) > 0:
-                        winner = results[0]
+                        # Extraer Top 20 por PnL neto
+                        top_20 = results[:20]
+                        top_20_details = [f" - {r['symbol']} | PnL: {r['pnl_after_fees']:.2f} USDT | Ops: {r['trades']}" for r in top_20]
+                        logger.info(f"Top 20 ganadores por PnL en el Backtest:\n" + "\n".join(top_20_details))
+                        
+                        if redis_client:
+                            await redis_client.set("grid:top20", json.dumps(top_20))
+
+                        winner = top_20[0]
+                        
+                        # --- Optimización IA FINAL solo para el ganador ---
+                        logger.info(f"🏆 Ganador seleccionado: {winner['symbol']}. Solicitando validación/optimización final a IA...")
+                        try:
+                            # Importar la función de IA
+                            from engine.ai_optimizer import get_ai_grid_params_batch
+                            # Intentar optimizar el ganador (enviando una lista de 1 elemento)
+                            ai_batch_result = await get_ai_grid_params_batch([winner], user_config)
+                            
+                            # Si la IA responde correctamente para ese símbolo, reemplazamos sus parámetros
+                            if winner['symbol'] in ai_batch_result and ai_batch_result[winner['symbol']]:
+                                logger.info(f"✅ IA optimizó exitosamente el ganador {winner['symbol']}.")
+                                winner['ai_params'] = ai_batch_result[winner['symbol']]
+                            else:
+                                logger.warning(f"⚠️ IA no respondió o falló para el ganador. Manteniendo parámetros heurísticos.")
+                        except Exception as e:
+                            logger.error(f"Error al llamar a IA para el ganador: {e}. Manteniendo parámetros heurísticos.")
+                            
                         best_opportunity = winner
 
                         if redis_client:

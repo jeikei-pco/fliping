@@ -12,9 +12,10 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
     """
     Escanea todos los mercados Swap USDT en OKX.
     limit=288 representa 24 horas en velas de 5 minutos.
-    Devuelve el Top 20 de símbolos con menor CV (más constantes).
+    Devuelve el Top 20 de símbolos con menor CV (más constantes) o mejor amplitud.
     """
-    logger.info("Iniciando Screener Global de Constancia...")
+    modo_str = "DEMO/SANDBOX" if sandbox else "REAL"
+    logger.info(f"Iniciando Screener Global en modo {modo_str}...")
     
     exchange = ccxt.okx({
         'apiKey': api_key,
@@ -36,15 +37,21 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
     patch_ccxt_resolver(exchange)
         
     try:
-        await exchange.load_markets()
+        try:
+            await exchange.load_markets()
+        except Exception as e:
+           # _check_okx_51155(e)
+            logger.error(f"Fallo al cargar mercados en el Screener: {e}")
+            return []
         
         # Filtrar mercados: solo futuros lineales (Swap USDT) que estén activos
         symbols = []
         for symbol, market in exchange.markets.items():
-            if market.get('swap') and market.get('quote') == 'USDT' and market.get('active'):
+            # Validación estricta para OKX Swap USDT
+            if market.get('swap')  and market.get('active'):
                 symbols.append(symbol)
                 
-        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT.")
+        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT en {modo_str}.")
         
         # Para pruebas o sandbox, podríamos no tener demasiados. 
         # Vamos a escanearlos en lotes para no saturar el Rate Limit.
@@ -61,25 +68,27 @@ async def scan_all_usdt_futures(api_key, secret, passphrase, sandbox=True, timef
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for res in batch_results:
-                if isinstance(res, dict) and res['cv'] is not None:
+                if isinstance(res, dict) and res.get('cv') is not None:
                     results.append(res)
                     
             logger.info(f"Progreso Screener: {min(i+batch_size, len(symbols))}/{len(symbols)}")
             await asyncio.sleep(0.5) # Pausa por rate limits
             
-        # 1. Filtramos los símbolos que no cumplen el mínimo de 0.20% de cuerpo (avg_body_pct)
-        # avg_body_pct viene multiplicado por 100 en el dict (ej: 0.21)
-        valid_results = [r for r in results if r.get('avg_body_pct', 0) >= 0.20]
+        # Pasamos todos los símbolos (sin filtro de avg_body_pct)
+        logger.info(f"Símbolos escaneados: {len(results)}")
+        valid_results = results
+        logger.info(f"Símbolos válidos (avg_body_pct >= 0.20): {len(valid_results)}")
 
         # 2. Ordenamos de MAYOR a MENOR cuerpo promedio (reverse=True)
         # Esto garantiza que el Top 1 sea el activo con velas más grandes y rentables.
         valid_results.sort(key=lambda x: x.get('avg_body_pct', 0), reverse=True)
         
-        top_20 = valid_results[:20]
+        valid_symbols = valid_results
         
-        logger.info(f"Screener terminado. Top 1: {top_20[0]['symbol'] if top_20 else 'N/A'}")
+        valid_symbols_names = [r['symbol'] for r in valid_symbols]
+        logger.info(f"Screener terminado. {len(valid_symbols)} seleccionados (todos los válidos).")
         
-        return top_20
+        return valid_symbols
         
     finally:
         await exchange.close()
@@ -109,9 +118,8 @@ async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=200):
         
         avg_amplitude = df_clean["amplitud"].mean()
         
-        # FILTRO 1: Amplitud mínima del 0.30% (cubre 2 líneas + comisiones)
-        if avg_amplitude < 0.0030:
-            return {'symbol': symbol, 'cv': None}
+        # Sin filtro de amplitud mínima
+        avg_amplitude_val = avg_amplitude if pd.notna(avg_amplitude) else 0.001
             
         # 3. Contexto Direccional (EMAs)
         df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -128,21 +136,21 @@ async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=200):
         else:
             trend = 'neutral'
             
-        # 4. Validación Nominal (Grid de 4 líneas con 50 USDT a 15x)
-        # 50 * 15 = 750 USDT totales / 4 líneas = 187.5 USDT por orden
-        inversion_por_linea = (50.0 * 15.0) / 4.0 
+        # 4. Validación Nominal (Grid de 4 líneas con 7.5 USDT a 15x)
+        # 7.5 * 15 = 112.5 USDT totales / 4 líneas = 28.125 USDT por orden
+        inversion_por_linea = (7.5 * 15.0) / 4.0 
         qty_necesaria = (inversion_por_linea / precio_actual) / contract_size
         
-        if qty_necesaria < min_qty:
-            # OKX rechazará la orden por ser muy pequeña
-            return {'symbol': symbol, 'cv': None}
-            
+        # Sin filtro de cantidad mínima nominal
+        
         return {
             'symbol': symbol,
-            'avg_body_pct': float(avg_amplitude * 100), # Reutilizamos esta variable para la IA
+            'avg_body_pct': float(avg_amplitude_val * 100), # Reutilizamos esta variable para la IA
             'cv': 1.0, # Dummy para pasar el filtro antiguo
             'trend': trend,
             'precio_actual': float(precio_actual)
         }
     except Exception as e:
-        return {'symbol': symbol, 'cv': None}
+       #_check_okx_51155(e)  Re-lanza la excepción si es error de 
+       logger.error(f"Error al analizar el símbolo {symbol}: {e}")
+    return {'symbol': symbol, 'cv': None}

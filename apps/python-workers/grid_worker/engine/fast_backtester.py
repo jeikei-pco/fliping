@@ -6,7 +6,7 @@ from .net_utils import patch_ccxt_resolver
 
 logger = logging.getLogger("GridWorker.Backtester")
 
-async def run_vectorized_backtest(api_key, secret, passphrase, symbols, sandbox=True, investment=1000, max_leverage=15.0):
+async def run_vectorized_backtest(api_key, secret, passphrase, symbols, sandbox=True, investment=50.0, max_leverage=15.0):
     """
     Toma una lista de símbolos, descarga sus últimas 24h en velas de 5 minutos,
     y simula un Grid NEUTRAL descontando comisiones REALES del exchange.
@@ -49,17 +49,16 @@ async def run_vectorized_backtest(api_key, secret, passphrase, symbols, sandbox=
                 # Multiplicamos por 2 para obtener el costo del ciclo completo (compra + venta)
                 fee_pct = taker_fee * 2 
                 
-                # 3. Velas de 5m (288 velas = 24 horas)
-                ohlcvs = await exchange.fetch_ohlcv(symbol, '5m', limit=288)
+                # 3. Velas de 5m (8 horas = 96 velas)
+                ohlcvs = await exchange.fetch_ohlcv(symbol, '5m', limit=96)
                 
-                # Relajamos a 200 velas para evitar descartes masivos en Testnet
-                if not ohlcvs or len(ohlcvs) < 200:
+                # Relajamos a 10 velas para evitar descartes masivos en Testnet
+                if not ohlcvs or len(ohlcvs) < 10:
                     continue
                     
                 df = pd.DataFrame(ohlcvs, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 center_price = df.iloc[0]['close']
                 
-                # 4. Leer parámetros de IA
                 # 4. Leer parámetros de IA
                 ai_params = sym_data.get('ai_params', {})
                 grid_spacing_factor = float(ai_params.get('grid_spacing_factor', sym_data.get('avg_body_pct', 0.5)))
@@ -71,11 +70,11 @@ async def run_vectorized_backtest(api_key, secret, passphrase, symbols, sandbox=
                     
                 grid_spacing = center_price * spacing_pct
                 
-                # --- NUEVA LÓGICA SIMÉTRICA 50/50 ---
                 total_grid_lines = int(ai_params.get('grid_lines', 10))
                 half_lines = total_grid_lines // 2  # Si la IA pide 10, usa 5 por lado
                 
                 leverage_used = float(ai_params.get('leverage', max_leverage))
+                direction = ai_params.get('direction', sym_data.get('trend', 'neutral'))
                 
                 # Construimos los niveles desde -half_lines hasta +half_lines
                 levels = [center_price + (i * grid_spacing) for i in range(-half_lines, half_lines + 1)]
@@ -86,51 +85,86 @@ async def run_vectorized_backtest(api_key, secret, passphrase, symbols, sandbox=
                 peak_capital = investment
                 current_capital = investment
                 
-                # El capital de inversión se divide entre el TOTAL de líneas que pidió la IA
                 capital_per_grid = investment / total_grid_lines 
-                current_level_idx = half_lines # El centro exacto
                 trades_won = 0
                 
-                # 6. Lógica 100% Neutral
+                orders = {}
+                for i, L in enumerate(levels):
+                    if L < center_price:
+                        if direction in ['neutral', 'long']:
+                            orders[i] = ('buy', 'open_long')
+                    elif L > center_price:
+                        if direction in ['neutral', 'short']:
+                            orders[i] = ('sell', 'open_short')
+                
+                # 6. Lógica de Simulación de Grid Realista
+                current_price = center_price
                 for row in df.itertuples():
-                    high = row.high
-                    low = row.low
+                    open_p, high_p, low_p, close_p = row.open, row.high, row.low, row.close
                     
-                    # Verificamos si tocamos el nivel de arriba
-                    if current_level_idx < len(levels) - 1:
-                        upper_level = levels[current_level_idx + 1]
-                        if high >= upper_level:
-                            # Ganancia real descontando la comisión exacta de OKX
-                            profit = capital_per_grid * (spacing_pct - fee_pct) * leverage_used
-                            pnl += profit
-                            current_capital += profit
-                            trades_won += 1
-                            current_level_idx += 1
-                            
-                    # Verificamos si tocamos el nivel de abajo
-                    if current_level_idx > 0:
-                        lower_level = levels[current_level_idx - 1]
-                        if low <= lower_level:
-                            # Ganancia real descontando la comisión exacta de OKX
-                            profit = capital_per_grid * (spacing_pct - fee_pct) * leverage_used
-                            pnl += profit
-                            current_capital += profit
-                            trades_won += 1
-                            current_level_idx -= 1
-                            
-                    # Cálculo de Drawdown
-                    if current_capital > peak_capital:
-                        peak_capital = current_capital
+                    if close_p >= open_p:
+                        path = [low_p, high_p, close_p]
+                    else:
+                        path = [high_p, low_p, close_p]
                         
+                    for target in path:
+                        if target < current_price:
+                            crossed_levels = [i for i, L in enumerate(levels) if target <= L <= current_price]
+                            crossed_levels.sort(reverse=True)
+                            for i in crossed_levels:
+                                if i in orders and orders[i][0] == 'buy':
+                                    _, type_ = orders[i]
+                                    del orders[i]
+                                    if type_ == 'close_short':
+                                        profit = capital_per_grid * (spacing_pct - fee_pct) * leverage_used
+                                        pnl += profit
+                                        current_capital += profit
+                                        trades_won += 1
+                                        if direction in ['neutral', 'short'] and i+1 < len(levels):
+                                            orders[i+1] = ('sell', 'open_short')
+                                    elif type_ == 'open_long':
+                                        if i+1 < len(levels):
+                                            orders[i+1] = ('sell', 'close_long')
+                        elif target > current_price:
+                            crossed_levels = [i for i, L in enumerate(levels) if current_price <= L <= target]
+                            crossed_levels.sort()
+                            for i in crossed_levels:
+                                if i in orders and orders[i][0] == 'sell':
+                                    _, type_ = orders[i]
+                                    del orders[i]
+                                    if type_ == 'close_long':
+                                        profit = capital_per_grid * (spacing_pct - fee_pct) * leverage_used
+                                        pnl += profit
+                                        current_capital += profit
+                                        trades_won += 1
+                                        if direction in ['neutral', 'long'] and i-1 >= 0:
+                                            orders[i-1] = ('buy', 'open_long')
+                                    elif type_ == 'open_short':
+                                        if i-1 >= 0:
+                                            orders[i-1] = ('buy', 'close_short')
+                        current_price = target
+                        
+                    # Drawdown tracking con Unrealized PnL
+                    upnl = 0
+                    for i, (action, type_) in orders.items():
+                        if type_ == 'close_long':
+                            entry_price = levels[i-1]
+                            upnl += capital_per_grid * leverage_used * ((close_p - entry_price) / entry_price) - (capital_per_grid * leverage_used * taker_fee)
+                        elif type_ == 'close_short':
+                            entry_price = levels[i+1]
+                            upnl += capital_per_grid * leverage_used * ((entry_price - close_p) / entry_price) - (capital_per_grid * leverage_used * taker_fee)
+                            
+                    total_equity = current_capital + upnl
+                    if total_equity > peak_capital:
+                        peak_capital = total_equity
                     if peak_capital > 0:
-                        drawdown = (peak_capital - current_capital) / peak_capital * 100
+                        drawdown = (peak_capital - total_equity) / peak_capital * 100
                     else:
                         drawdown = 0
-                        
                     if drawdown > max_drawdown:
                         max_drawdown = drawdown
 
-                pnl_after_fees = pnl # Ya descontamos el fee en el ciclo
+                pnl_after_fees = pnl
                 
                 results.append({
                     'symbol': symbol,

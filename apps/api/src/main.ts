@@ -77,70 +77,91 @@ const saasEngine = new SaasEngineService(
   engineStatusRepository,
 );
 
-// ── HTTP App ─────────────────────────────────────────────────────────────
-const app = createHttpApp({
-  vault,
-  balance,
-  cryptoEngine,
-  alertService,
-  opportunityService,
-  engineManager,
-  techEngine,
-  realEstateEngine,
-  saasEngine,
-  defaultUserId,
-  appOrigin,
-});
-
 // ── Bootstrap ─────────────────────────────────────────────────────────────
 const bootstrap = async () => {
   await prisma.$connect();
 
-  // Restaurar motores que estaban activos al momento del reinicio del servidor
-  const motors = ["tech", "real-estate", "saas", "grid"] as const;
+  // Buscar el usuario más reciente logueado/creado en el sistema
+  const latestUser = await prisma.appUser.findFirst({
+    orderBy: { updatedAt: "desc" }
+  });
+  
+  // Usar el usuario logueado en la app móvil, o caer al fallback de .env
+  const dynamicDefaultUserId = latestUser ? latestUser.id : (process.env.DEFAULT_USER_ID ?? "demo-user");
+  console.log(`[Bootstrap] Usuario principal del sistema establecido a: ${dynamicDefaultUserId}`);
 
-  for (const motor of motors) {
-    const storedStatus = await engineStatusRepository.findByUserAndMotor(defaultUserId, motor);
-    // Grid está activo por defecto si no hay registro
-    const isEnabled = storedStatus ? storedStatus.enabled : (motor === "grid");
-    
-    if (isEnabled) {
-      console.log(`[Bootstrap] Restaurando Motor ${motor} para usuario ${defaultUserId}...`);
-      if (motor === "tech") {
-        void techEngine.toggle({ userId: defaultUserId, enabled: true });
-      } else if (motor === "real-estate") {
-        void realEstateEngine.toggle({ userId: defaultUserId, enabled: true });
-      } else if (motor === "saas") {
-        void saasEngine.toggle({ userId: defaultUserId, enabled: true });
-      }
-    }
+  const app = createHttpApp({
+    vault,
+    balance,
+    cryptoEngine,
+    alertService,
+    opportunityService,
+    engineManager,
+    techEngine,
+    realEstateEngine,
+    saasEngine,
+    defaultUserId: dynamicDefaultUserId,
+    appOrigin,
+  });
+
+  // Restaurar motores que estaban activos al momento del reinicio del servidor
+  console.log(`[Bootstrap] Buscando motores activos en la base de datos...`);
+  
+  const activeTechEngines = await prisma.engineStatus.findMany({ where: { motor: "tech", enabled: true } });
+  for (const status of activeTechEngines) {
+    console.log(`[Bootstrap] Restaurando Motor tech para usuario ${status.userId}...`);
+    void techEngine.toggle({ userId: status.userId, enabled: true });
+  }
+
+  const activeSaasEngines = await prisma.engineStatus.findMany({ where: { motor: "saas", enabled: true } });
+  for (const status of activeSaasEngines) {
+    console.log(`[Bootstrap] Restaurando Motor saas para usuario ${status.userId}...`);
+    void saasEngine.toggle({ userId: status.userId, enabled: true });
+  }
+
+  const activeRealEstateEngines = await prisma.engineStatus.findMany({ where: { motor: "real-estate", enabled: true } });
+  for (const status of activeRealEstateEngines) {
+    console.log(`[Bootstrap] Restaurando Motor inmobiliario para usuario ${status.userId}...`);
+    void realEstateEngine.toggle({ userId: status.userId, enabled: true });
   }
 
   const { spawnPythonWorker, stopPythonWorker } = await import("./infrastructure/workers/python-spawner.js");
   spawnPythonWorker();
 
-  // Si el motor grid está activo, enviar credenciales
-  const gridStatus = await engineStatusRepository.findByUserAndMotor(defaultUserId, "grid");
-  const isGridEnabled = gridStatus ? gridStatus.enabled : true;
+  // Si el motor grid está activo para algún usuario, enviar credenciales
+  let activeGridEngines = await prisma.engineStatus.findMany({ where: { motor: "grid", enabled: true } });
   
-  if (isGridEnabled) {
+  // FALLBACK: Si no hay usuarios en DB con el grid activo, usar el dynamicDefaultUserId
+  if (activeGridEngines.length === 0) {
+    const defaultGridStatus = await prisma.engineStatus.findUnique({
+      where: { userId_motor: { userId: dynamicDefaultUserId, motor: "grid" } }
+    });
+    // Si no existe registro o si existe y está enabled, lo forzamos a iniciar (fallback)
+    if (!defaultGridStatus || defaultGridStatus.enabled) {
+      activeGridEngines = [{ userId: dynamicDefaultUserId, motor: "grid", enabled: true } as any];
+    }
+  }
+
+  if (activeGridEngines.length > 0) {
     setTimeout(async () => {
-      try {
-        const provider = await vault.getDecryptedProvider(defaultUserId, "okx");
-        if (provider) {
-          console.log(`[Bootstrap] Motor Grid Activo (Sandbox: ${provider.sandbox}): Enviando auto_start a Python...`);
-          const { dispatchGridEngine } = await import("./infrastructure/workers/grid-queue.js");
-          await dispatchGridEngine("auto_start", {
-            apiKey: provider.payload.apiKey,
-            secret: provider.payload.secret,
-            passphrase: provider.payload.passphrase,
-            sandbox: provider.sandbox,
-          });
-        } else {
-          console.log("[Bootstrap] Motor Grid Activo pero NO hay credenciales OKX en la Bóveda.");
+      for (const status of activeGridEngines) {
+        try {
+          const provider = await vault.getDecryptedProvider(status.userId, "okx");
+          if (provider) {
+            console.log(`[Bootstrap] Motor Grid Activo para ${status.userId} (Sandbox: ${provider.sandbox}): Enviando auto_start...`);
+            const { dispatchGridEngine } = await import("./infrastructure/workers/grid-queue.js");
+            await dispatchGridEngine("auto_start", {
+              apiKey: provider.payload.apiKey,
+              secret: provider.payload.secret,
+              passphrase: provider.payload.passphrase,
+              sandbox: provider.sandbox,
+            });
+          } else {
+            console.log(`[Bootstrap] Motor Grid Activo para ${status.userId} pero NO hay credenciales OKX en la Bóveda.`);
+          }
+        } catch (err) {
+          console.error(`[Bootstrap] Error enviando auto_start para ${status.userId}:`, err);
         }
-      } catch (err) {
-        console.error("[Bootstrap] Error enviando auto_start:", err);
       }
     }, 3000); // Dar 3 segundos para que Python levante BullMQ
   }
