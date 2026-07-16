@@ -1,8 +1,12 @@
 import sys
 import asyncio
 import os
+import logging
+import json
+import redis.asyncio as redis
+from bullmq import Worker
 
-# Cargar variables de entorno desde tests/.env
+# Cargar variables de entorno desde tests/.env (si existe)
 env_path = os.path.join(os.path.dirname(__file__), "tests", ".env")
 if os.path.exists(env_path):
     with open(env_path, "r") as f:
@@ -12,12 +16,10 @@ if os.path.exists(env_path):
                 key, val = line.split("=", 1)
                 os.environ[key.strip()] = val.strip().strip("\"'")
 
-import logging
-import json
-import redis.asyncio as redis
-from bullmq import Worker
-
-from engine.okx_ws import OkxWsClient, detect_active_exchange_grid, _create_exchange
+# Importaciones del motor (Arquitectura Hexagonal / Inyección de dependencias)
+from engine.exchange_ports import EnvironmentAdapter
+from engine.ccxt_controller import CCXTController
+from engine.okx_ws import OkxWsClient, detect_active_exchange_grid
 from engine.consistency_screener import scan_all_usdt_futures
 from engine.fast_backtester import run_vectorized_backtest
 from engine.ai_optimizer import get_ai_grid_params_batch
@@ -26,7 +28,7 @@ from engine.optimizer_integrator import optimize_grid_params
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("GridWorker")
 
-# Variables globales para el estado del engine
+# Variables globales de estado
 engine_instance = None
 redis_client = None
 metrics_task = None
@@ -34,6 +36,7 @@ watchdog_task = None
 best_opportunity = None
 current_task_name = "Standby"
 ai_recommendation = None
+
 
 async def update_redis_metrics():
     """ Tarea en segundo plano para publicar las métricas a Redis periódicamente """
@@ -56,34 +59,28 @@ async def update_redis_metrics():
 
             try:
                 await redis_client.set("grid:metrics", json.dumps(payload))
-            except Exception as e:
+            except Exception:
                 pass
         await asyncio.sleep(2)
 
-async def test_exchange_connection(exchange_id, api_key, secret, passphrase, sandbox):
-    mode = "DEMO/SANDBOX" if sandbox else "REAL"
-    logger.info(f"Probando conexión a {exchange_id} ({mode})...")
-    exchange = _create_exchange(exchange_id, api_key, secret, passphrase, sandbox=sandbox)
-    try:
-        await exchange.fetch_balance()
-        logger.info(f"✅ Conexión EXITOSA a {exchange_id} ({mode}) - API Privada accesible.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Fallo en conexión a {exchange_id} ({mode}): {e}")
-        return False
-    finally:
-        await exchange.close()
 
-async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
+async def watchdog_loop(controller: CCXTController):
+    """
+    Bucle principal de vigilancia.
+    Recibe el controlador de CCXT inyectado y lo reparte a las sub-rutinas.
+    """
     global engine_instance, redis_client, best_opportunity, current_task_name, ai_recommendation
     
     logger.info("Watchdog Loop iniciado.")
     
     while True:
         try:
-            current_task_name = f"Consultando {exchange_id}"
-            grid_status = await detect_active_exchange_grid(exchange_id, api_key, secret, passphrase, sandbox)
+            current_task_name = f"Consultando {controller.exchange_id}"
             
+            # 1. Detectar si ya hay un grid activo usando el controlador
+            grid_status = await detect_active_exchange_grid(controller)
+            
+            # 2. Obtener configuración del usuario desde Redis
             user_config = {}
             if redis_client:
                 try:
@@ -100,9 +97,13 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                 logger.info(f"Grid real detectado en {active_symbol}. Reanudando monitoreo...")
                 
                 if not engine_instance or not engine_instance.running:
+                    # Instanciar Bot con inyección del controlador
                     engine_instance = OkxWsClient(
-                        exchange_id, api_key, secret, passphrase, sandbox, 
-                        symbol=active_symbol, timeframe="15m", base_capital=base_capital, resume_existing_grid=True
+                        controller=controller, 
+                        symbol=active_symbol, 
+                        timeframe="15m", 
+                        base_capital=base_capital, 
+                        resume_existing_grid=True
                     )
                     asyncio.create_task(engine_instance.start())
                 
@@ -113,18 +114,17 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                 current_task_name = "Screener"
                 logger.info("No hay grid activo. Iniciando escaneo global...")
 
-                all_symbols = await scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbox)
+                # Pasar el controlador al Screener
+                all_symbols = await scan_all_usdt_futures(controller)
                 
                 if all_symbols:
-                    # 1. Tomar solo el Top 20 más prometedor (Ahorra tokens de IA y tiempo)
+                    # Top 20 más prometedor
                     top_candidates = all_symbols[:20]
                     
-                    # 2. Optimización IA en bloque para el Top 20
                     current_task_name = "Optimizador IA"
                     logger.info(f"Solicitando parámetros a la IA para el Top {len(top_candidates)}...")
                     ai_batch_result = await get_ai_grid_params_batch(top_candidates, user_config)
                     
-                    # Inyectar resultados (o fallback) en los candidatos
                     for sym_data in top_candidates:
                         symbol = sym_data['symbol']
                         if symbol in ai_batch_result:
@@ -132,11 +132,15 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                         else:
                             sym_data['ai_params'] = optimize_grid_params(None, sym_data)
 
-                    # 3. Backtest Masivo (Ahora sí, usando los parámetros de la IA)
                     current_task_name = "Backtest"
                     logger.info("Ejecutando Backtest con los parámetros optimizados...")
+                    
+                    # Pasar el controlador al Backtester
                     results = await run_vectorized_backtest(
-                        exchange_id, api_key, secret, passphrase, top_candidates, sandbox, base_capital, max_leverage
+                        controller=controller, 
+                        symbols=top_candidates, 
+                        investment=base_capital, 
+                        max_leverage=max_leverage
                     )
 
                     if results and len(results) > 0:
@@ -147,32 +151,37 @@ async def watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox):
                             await redis_client.set("grid:top20", json.dumps(results[:20]))
                             await redis_client.set("grid:backtest_top10", json.dumps(results[:10]))
 
-                        # 4. Selección del Ganador Definitivo
                         winner = results[0]
                         best_opportunity = winner
                         ai_recommendation = winner.get('ai_params', {})
                         
-                        logger.info(f"🏆 GANADOR: {winner['symbol']} | PnL Neto: {winner['pnl_after_fees']:.4f} USDT | Origen Params: {ai_recommendation.get('source', 'desconocido')}")
+                        logger.info(f"🏆 GANADOR: {winner['symbol']} | PnL Neto: {winner['pnl_after_fees']:.4f} USDT")
 
-                        # 5. Iniciar Motor de Trading
                         if not engine_instance or not engine_instance.running:
                             logger.info(f"Iniciando Grid en el ganador: {winner['symbol']}")
+                            
+                            # Instanciar nuevo Bot con el controlador
                             engine_instance = OkxWsClient(
-                                exchange_id, api_key, secret, passphrase, sandbox,
-                                symbol=winner['symbol'], timeframe="15m", base_capital=base_capital,
-                                ai_recommendation=ai_recommendation, resume_existing_grid=False
+                                controller=controller,
+                                symbol=winner['symbol'], 
+                                timeframe="15m", 
+                                base_capital=base_capital,
+                                ai_recommendation=ai_recommendation, 
+                                resume_existing_grid=False
                             )
                             asyncio.create_task(engine_instance.start())
 
                         current_task_name = "Grid (Trading)"
 
         except Exception as e:
-            logger.error(f"Error en el watchdog scanner: {e}")
+            logger.error(f"Error en el watchdog scanner: {e}", exc_info=True)
         
         logger.info(f"Watchdog durmiendo por 1 hora... (Current Task: {current_task_name})")
         await asyncio.sleep(60 * 60 * 1)
 
+
 async def process_job(job, job_token):
+    """ Procesador de comandos provenientes de BullMQ (Node.js) """
     global engine_instance, metrics_task, watchdog_task
     
     logger.info(f"Procesando job {job.name} (ID: {job.id})")
@@ -191,10 +200,23 @@ async def process_job(job, job_token):
         if not api_key or not secret:
             return {"status": "Error", "message": "Credenciales incompletas"}
             
-        await test_exchange_connection(exchange_id, api_key, secret, passphrase, sandbox=sandbox)
-        watchdog_task = asyncio.create_task(watchdog_loop(exchange_id, api_key, secret, passphrase, sandbox))
+        try:
+            # 1. Ensamblaje Arquitectónico: Instanciamos Adaptador y Controlador
+            adapter = EnvironmentAdapter(api_key, secret, passphrase, sandbox)
+            controller = CCXTController(exchange_id, adapter)
             
-        return {"status": "Started", "message": "Watchdog Autónomo iniciado."}
+            # 2. Probamos conexión inicial a través del controlador
+            await controller.get_instance().fetch_balance()
+            logger.info(f"✅ Conexión validada exitosamente vía Controlador ({'SANDBOX' if sandbox else 'REAL'}).")
+            
+            # 3. Lanzamos el Watchdog pasándole el controlador
+            watchdog_task = asyncio.create_task(watchdog_loop(controller))
+            
+            return {"status": "Started", "message": "Watchdog Autónomo iniciado con Inyección de Dependencias."}
+            
+        except Exception as e:
+            logger.error(f"❌ Fallo de conexión o inicialización: {e}", exc_info=True)
+            return {"status": "Error", "message": str(e)}
 
     elif job.name == "stop":
         logger.info("Recibido comando stop. Deteniendo operaciones...")
@@ -203,7 +225,10 @@ async def process_job(job, job_token):
             watchdog_task = None
             
         if engine_instance:
-            engine_instance.running = False # Apagado seguro del loop
+            engine_instance.running = False 
+            if hasattr(engine_instance, 'exchange'):
+                # Cerramos la conexión compartida ordenadamente
+                await engine_instance.exchange.close()
             
         if redis_client:
             await redis_client.set("grid:metrics", json.dumps({"status": "Offline", "message": "Apagado por el usuario"}))
@@ -211,6 +236,7 @@ async def process_job(job, job_token):
         return {"status": "Stopped", "message": "Motor Grid detenido."}
 
     return {"status": "Ignored", "message": "Comando no reconocido."}
+
 
 async def main():
     global redis_client, metrics_task

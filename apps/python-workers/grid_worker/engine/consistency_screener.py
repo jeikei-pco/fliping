@@ -4,25 +4,23 @@ import pandas as pd
 import numpy as np
 import logging
 from .math_core import calculate_cv
-from .net_utils import patch_ccxt_resolver
 
 logger = logging.getLogger("GridWorker.Screener")
 
 
-async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbox=True, timeframe="15m", limit=288):
+async def scan_all_usdt_futures(controller, timeframe="15m", limit=288):
     """
-    Escanea todos los mercados Swap USDT en el exchange especificado DIRECTAMENTE DESDE EL EXCHANGE.
+    Escanea todos los mercados Swap USDT usando el controlador central.
     limit=288 representa 24 horas en velas de 5 minutos.
     Devuelve los símbolos ordenados por el Score de Promesa (Tamaño, Calidad y Predictibilidad).
     """
-    from .okx_ws import _create_exchange
-    modo_str = "DEMO/SANDBOX" if sandbox else "REAL"
-    logger.info(f"Iniciando Screener Global en {exchange_id} (Modo {modo_str})...")
+    logger.info(f"Iniciando Screener Global en {controller.exchange_id}...")
     
-    exchange = _create_exchange(exchange_id, api_key, secret, passphrase, sandbox)
+    # 1. Obtenemos la instancia lista y compartida desde el controlador
+    exchange = controller.get_instance()
         
     try:
-        # 1. SIEMPRE DESCARGAR DESDE EL EXCHANGE
+        # SIEMPRE DESCARGAR DESDE EL EXCHANGE
         try:
             await exchange.load_markets()
         except Exception as e:
@@ -39,7 +37,7 @@ async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbo
             if is_swap and is_active and is_usdt_settled:
                 symbols.append(symbol)
                 
-        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT 100% operables en {modo_str}.")
+        logger.info(f"Encontrados {len(symbols)} mercados Swap USDT operables.")
         
         # 3. Escaneo por lotes
         batch_size = 20
@@ -50,6 +48,7 @@ async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbo
             tasks = []
             
             for symbol in batch:
+                # fetch_and_calculate_cv sigue recibiendo 'exchange'
                 tasks.append(fetch_and_calculate_cv(exchange, symbol, timeframe, limit))
                 
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -71,8 +70,9 @@ async def scan_all_usdt_futures(exchange_id, api_key, secret, passphrase, sandbo
         
         return valid_results
         
-    finally:
-        await exchange.close()
+    except Exception as e:
+        logger.error(f"Error general en el proceso del Screener: {e}")
+        return []
 
 
 async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=288):
@@ -80,6 +80,18 @@ async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=288):
         # 1. Obtener límites de OKX para validación nominal
         market = exchange.markets.get(symbol, {})
         contract_size = float(market.get("contractSize", 1.0))
+        
+        # Extraer apalancamiento máximo permitido por el exchange para este symbol (OKX usa 'lever' en info)
+        max_lev = 15.0
+        try:
+            if 'limits' in market and 'leverage' in market['limits'] and market['limits']['leverage'].get('max'):
+                max_lev = float(market['limits']['leverage']['max'])
+            elif 'lever' in market.get('info', {}):
+                max_lev = float(market['info']['lever'])
+            elif 'maxLeverage' in market.get('info', {}):
+                max_lev = float(market['info']['maxLeverage'])
+        except Exception:
+            pass
         
         # Descargar Velas
         ohlcvs = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -141,7 +153,8 @@ async def fetch_and_calculate_cv(exchange, symbol, timeframe="15m", limit=288):
             'quality': float(avg_quality),
             'std_dev': float(std_dev),
             'trend': trend,
-            'precio_actual': float(precio_actual)
+            'precio_actual': float(precio_actual),
+            'max_leverage': float(max_lev)
         }
     except Exception as e:
        logger.error(f"Error al analizar el símbolo {symbol}: {e}")

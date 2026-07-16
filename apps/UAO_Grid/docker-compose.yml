@@ -1,0 +1,32 @@
+name: uao_grid
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # UAO_Grid_okx — Grid Trading de futuros USDT en OKX
+  #
+  # Construir y levantar (desde cualquier directorio):
+  #   docker compose -f /opt/imperio_agents/workspace/UAO_Sclaping/docker-compose.grid.yml up --build -d
+  # ─────────────────────────────────────────────────────────────────────────────
+  imperio-uao_grid:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: imperio-uao_grid:latest
+    container_name: imperio-uao_grid
+    network_mode: "host"
+    restart: unless-stopped
+    command: [ "python", "main.py" ]
+    env_file:
+      - ../../.env
+      - .env
+    environment:
+      UAO_NAME: "UAO_Grid_okx"
+      UAO_RUNTIME: "docker-compose"
+
+    volumes:
+      - .:/app
+      - ../../shared:/imperio_shared:ro
+
+    labels:
+      imperio.agent: "uao"
+      imperio.uao: "UAO_Grid_okx"

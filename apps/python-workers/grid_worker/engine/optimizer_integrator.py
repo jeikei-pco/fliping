@@ -37,8 +37,10 @@ def optimize_grid_params(ai_params, screener_data):
         grid_lines = 8
         
     # 4. Apalancamiento (Leverage)
-    # Inversamente proporcional al tamaño de la vela. Max 20x, Min 2x.
-    leverage = min(20.0, max(2.0, round(15.0 / (avg_body if avg_body > 0 else 0.5))))
+    # Inversamente proporcional al tamaño de la vela. Max 20x, Min 2x. Limitar al máximo del symbol.
+    symbol_max_lev = float(screener_data.get('max_leverage', 15.0))
+    calculated_lev = round(15.0 / (avg_body if avg_body > 0 else 0.5))
+    leverage = min(symbol_max_lev, 20.0, max(2.0, calculated_lev))
     
     # 5. Frecuencia de Recálculo (Minutos)
     # Si el par es muy errático (alta desviación), recalculamos la malla más rápido

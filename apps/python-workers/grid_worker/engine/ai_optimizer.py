@@ -54,13 +54,16 @@ async def get_ai_grid_params_batch(batch, user_config):
         # Preparar datos enriquecidos para el Prompt
         prompt_data = []
         for s in symbols_to_fetch:
+            # Respetamos el maximo absoluto por usuario o por limite tecnico del exchange
+            max_lev_allowed = min(float(s.get('max_leverage', 15.0)), float(user_config.get("maxLeverage", 15.0)))
             prompt_data.append({
                 "symbol": s['symbol'],
                 "tamaño_vela_pct": s.get('avg_body_pct', 0.5 ),
                 "calidad_vela": s.get('quality', 0.5),
                 "desviacion_estandar": s.get('std_dev', 0.1),
                 "tendencia_macro": s.get('trend', 'neutral'),
-                "score_promesa": s.get('score', 0)
+                "score_promesa": s.get('score', 0),
+                "max_leverage": max_lev_allowed
             })
 
         prompt = f"""
@@ -71,7 +74,7 @@ async def get_ai_grid_params_batch(batch, user_config):
         Reglas estrictas:
         - grid_spacing_factor: Entre 0.15 y 1.5. Si la 'calidad_vela' es baja (<0.5, muchas mechas), aumenta el spacing.
         - grid_lines: Entero entre 4 y 20. Si la 'desviacion_estandar' es alta, usa más líneas para promediar.
-        - leverage: Máximo {user_config.get("maxLeverage", 15.0)}. A mayor 'tamaño_vela_pct', menor apalancamiento.
+        - leverage: Máximo estricto igual al campo 'max_leverage'. A mayor 'tamaño_vela_pct', menor apalancamiento.
         - recalculate_every_minutes: Entero (60, 120 o 240). Si es muy errático, recalcular rápido (60).
         - direction: Devuelve exactamente la 'tendencia_macro' ('long', 'short' o 'neutral').
         
@@ -153,3 +156,5 @@ async def get_ai_grid_params_batch(batch, user_config):
                 logger.info(f"[OptimizerIntegrator - Fallback] {symbol} -> {params}")
             
     return results
+
+

@@ -1,0 +1,1 @@
+import { getPrismaClient } from "./src/infrastructure/services/prisma-client-service.js"; import dotenv from "dotenv"; dotenv.config(); const p = getPrismaClient(); p.appUser.findMany().then(console.log).finally(() => p.$disconnect());
