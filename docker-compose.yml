@@ -43,5 +43,26 @@ services:
       REDIS_PORT: 6379
       PYTHONUNBUFFERED: "1"
 
+  uao_grid:
+    build:
+      context: ./apps/UAO_Grid
+      dockerfile: Dockerfile
+    container_name: jk-flipping-uao-grid
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      UAO_NAME: "UAO_Grid_okx"
+      UAO_RUNTIME: "docker-compose"
+      WEBHOOK_URL: "http://host.docker.internal:4000/api/webhook/grid"
+      PYTHONUNBUFFERED: "1"
+    env_file:
+      - ./apps/UAO_Grid/.env
+    volumes:
+      - ./apps/UAO_Grid:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   postgres_data:

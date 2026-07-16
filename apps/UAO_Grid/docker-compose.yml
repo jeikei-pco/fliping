@@ -22,6 +22,7 @@ services:
     environment:
       UAO_NAME: "UAO_Grid_okx"
       UAO_RUNTIME: "docker-compose"
+      WEBHOOK_URL: "http://host.docker.internal:4000/api/webhook/grid"
 
     volumes:
       - .:/app

@@ -21,4 +21,4 @@ ENV SCAN_TIMEFRAME=5m
 ENV SCAN_TOP_N=10
 ENV SCAN_MIN_VOLUME_USDT=1000000
 
-CMD ["python", "simulation_main.py"]
+CMD ["python", "main.py"]

@@ -120,7 +120,7 @@ export const createHttpApp = (services: {
   });
 
   app.use((request, response, next) => {
-    if (request.path.startsWith("/api/auth/") || request.path.startsWith("/api/internal/") || request.path === "/api/health") {
+    if (request.path.startsWith("/api/auth/") || request.path.startsWith("/api/internal/") || request.path.startsWith("/api/webhook/") || request.path === "/api/health") {
       return next();
     }
     const authHeader = request.headers.authorization;
@@ -443,6 +443,35 @@ export const createHttpApp = (services: {
       response.status(500).json({ success: false, error: error.message });
     }
   });
+
+  // ──────────────────────────────────────────────
+  // Webhooks para Grid
+  // ──────────────────────────────────────────────
+  app.post("/api/webhook/grid", async (request, response) => {
+    try {
+      const data = request.body;
+      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+      await gridRedisConnection.set("grid:webhook_status", JSON.stringify(data));
+      response.json({ success: true });
+    } catch (error: any) {
+      response.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get("/api/grid/status", async (_request, response) => {
+    try {
+      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+      const data = await gridRedisConnection.get("grid:webhook_status");
+      if (!data) {
+        response.json(null);
+        return;
+      }
+      response.json(JSON.parse(data));
+    } catch (error: any) {
+      response.status(500).json({ success: false, error: error.message });
+    }
+  });
+
 
   // ──────────────────────────────────────────────
   // Alertas (Sprint 3)

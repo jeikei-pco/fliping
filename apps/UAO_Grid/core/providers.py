@@ -101,34 +101,24 @@ def _chunked(items: Iterable[Any], n: int = 20):
 
 
 def _load_okx_credentials(prefix: str) -> Dict[str, str]:
-    """Carga credenciales por prefijo DEMO/REAL, fallback OKX_* y API interna."""
+    """Carga credenciales estrictamente desde el .env evitando sobrescrituras."""
     prefix = prefix.upper()
+    
+    # Prioridad absoluta: Variables con sufijo _DEMO o _REAL
     creds = {
-        "api_key": os.getenv(f"API_KEY_{prefix}") or os.getenv(f"OKX_API_KEY_{prefix}") or os.getenv("OKX_API_KEY", ""),
-        "api_secret": os.getenv(f"API_SECRET_{prefix}") or os.getenv(f"OKX_API_SECRET_{prefix}") or os.getenv("OKX_API_SECRET", ""),
-        "passphrase": os.getenv(f"PASSPHRASE_{prefix}") or os.getenv(f"OKX_PASSPHRASE_{prefix}") or os.getenv("OKX_API_PASSPHRASE", ""),
+        "api_key": os.getenv(f"OKX_API_KEY_{prefix}"),
+        "api_secret": os.getenv(f"OKX_API_SECRET_{prefix}"),
+        "passphrase": os.getenv(f"OKX_PASSPHRASE_{prefix}"),
     }
+    
+    # Validar que no estén vacías
     if creds["api_key"] and creds["api_secret"] and creds["passphrase"]:
+        logger.info(f"✅ Credenciales {prefix} cargadas correctamente.")
         return creds
 
-    url = os.getenv("CREDENTIALS_API_URL", "http://localhost:80/api/internal/credentials/exchanges").strip()
-    token = os.getenv("CREDENTIALS_API_TOKEN", "").strip() or os.getenv("IMPERIO_CREDENTIALS_API_TOKEN", "").strip()
-    if not token and os.path.exists("/imperio_shared/credentials_api.token"):
-        with open("/imperio_shared/credentials_api.token", "r", encoding="utf-8") as fh:
-            token = fh.read().strip()
-
-    try:
-        logger.info("Consultando credenciales OKX a la API interna: %s", url)
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            okx = payload.get("credentials", {}).get("okx", {})
-            creds["api_key"] = creds["api_key"] or okx.get("api_key", "")
-            creds["api_secret"] = creds["api_secret"] or okx.get("api_secret", "") or okx.get("secret", "")
-            creds["passphrase"] = creds["passphrase"] or okx.get("password", "") or okx.get("passphrase", "")
-    except Exception as exc:
-        logger.warning("No se pudieron cargar credenciales OKX por API: %s", exc)
-    return creds
+    # Si llegamos aquí y es DEMO, el bot no debería intentar llamar a la API interna 
+    # de producción, así que lanzamos error para que no conecte con credenciales erróneas.
+    raise ValueError(f"❌ Error: No se encontraron las credenciales {prefix} en el .env")
 
 
 class ExchangeProvider(ExecutionProvider):

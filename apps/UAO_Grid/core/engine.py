@@ -24,7 +24,9 @@ class GridEngine:
         self.precio_promedio = 0.0
         
         # Parámetros Base
-        self.num_lineas_lado = int(os.getenv("GRID_NUM_LINEAS_LADO", 5))
+        # La cantidad total de líneas se divide a la mitad (para buy y sell)
+        total_configurado = int(os.getenv("GRID_NUM_LINEAS_LADO", 10))
+        self.num_lineas_lado = max(1, total_configurado // 2)
         self.max_proximity_orders = int(os.getenv("GRID_PROXIMITY_ORDERS", 2))
         self.atr_multiplicador = float(os.getenv("GRID_ATR_MULTIPLIER", 1.5))
         
@@ -69,7 +71,8 @@ class GridEngine:
         if leverage is not None: 
             self.leverage = float(leverage)
             if self.centro_grid > 0: self._recalcular_inversion_por_nivel()
-        if num_lineas is not None: self.num_lineas_lado = int(num_lineas)
+        if num_lineas is not None: 
+            self.num_lineas_lado = max(1, int(num_lineas) // 2)
         if capital_inicial is not None:
             self.capital_inicial = float(capital_inicial)
             if self.centro_grid > 0: self._recalcular_inversion_por_nivel()
@@ -120,15 +123,16 @@ class GridEngine:
                 self.espaciado_actual = nuevo_espaciado
                 
                 cobertura_deseada = 0.04 
-                lineas_calculadas = int(cobertura_deseada / self.espaciado_actual)
-                self.num_lineas_lado = max(4, lineas_calculadas)
+                lineas_calculadas_totales = int(cobertura_deseada / self.espaciado_actual)
+                # Dividir a la mitad (sell y buy)
+                self.num_lineas_lado = max(2, lineas_calculadas_totales // 2)
                 self._recalcular_inversion_por_nivel()
                 self._hubo_cambio_atr = True
                 
                 logger.info(
                     f"🤖 [Auto-Grid Inteligente] Distancia: {self.espaciado_actual * 100:.2f}% | "
                     f"Líneas/lado: {self.num_lineas_lado} | "
-                    f"Cobertura: {self.num_lineas_lado * self.espaciado_actual * 100:.2f}%"
+                    f"Cobertura total: {self.num_lineas_lado * 2 * self.espaciado_actual * 100:.2f}%"
                 )
             else:
                 self._hubo_cambio_atr = False

@@ -222,6 +222,11 @@ class GridOrquestador:
                 if not self.engine.current_symbol:
                     self.engine.current_symbol = symbol
                 self.engine.procesar_ejecucion_simulada(side, price, qty, grid_level)
+                
+                # --- NUEVO: FORZAR RECONCILIACIÓN INMEDIATA ---
+                logger.info("⚡ [WS] Triggering instant reconciliation for TP/Grid adjustment.")
+                self._ejecutar_reconciliacion_inmediata(self.engine.current_symbol)
+                # ----------------------------------------------
                 event_ts = time.time()
                 self.last_fills_history.append({
                     "side": side,
@@ -242,6 +247,27 @@ class GridOrquestador:
             # ocurre naturalmente en el siguiente tick del WS público (en _loop_operativo).
         except Exception as exc:
             logger.error("Error procesando fill WS privado: %s", exc, exc_info=True)
+
+    def _ejecutar_reconciliacion_inmediata(self, symbol: str):
+        try:
+            # Obtenemos el precio actual del engine o un ticker rápido
+            ticker = self.exchange.fetch_ticker(symbol)
+            precio_actual = float(ticker['last'])
+            market_info = self.exchange.markets.get(symbol, {})
+            
+            # Obtener lo que el engine quiere que exista
+            deseadas = self.engine.obtener_ordenes_deseadas(precio_actual, market_info)
+            
+            # Obtener lo que hay realmente
+            actuales = self.provider.get_open_orders(symbol)
+            
+            # Reconciliar (esto usa tu lógica existente de CCXT)
+            self.provider.reconciliar_ordenes(deseadas, actuales)
+            self.engine.malla_modificada = False # Resetear flag
+            logger.info(f"✅ Reconciliación inmediata exitosa para {symbol}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error en reconciliación inmediata: {e}")
 
     def _webhook_worker(self):
         """Worker dedicado para enviar webhooks sin crear hilos por tick."""

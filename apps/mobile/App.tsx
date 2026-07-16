@@ -193,6 +193,7 @@ export default function App() {
   const [selectedBacktestSymbol, setSelectedBacktestSymbol] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [showGridConfig, setShowGridConfig] = useState(false);
+  const [uaoGridStatus, setUaoGridStatus] = useState<any>(null);
   
   const [gridBaseCapital, setGridBaseCapital] = useState("50");
   const [gridMaxLeverage, setGridMaxLeverage] = useState("15");
@@ -246,8 +247,10 @@ export default function App() {
     if (screen === "grid") {
       void loadGridConfig();
       void loadGridMetrics();
+      void loadUaoGridStatus();
       gridInterval = setInterval(() => {
         void loadGridMetrics();
+        void loadUaoGridStatus();
       }, 2000);
     }
     
@@ -536,6 +539,15 @@ export default function App() {
           setGridLogs(res.logs);
         }
       }
+    } catch (e: any) {
+      // silent
+    }
+  };
+
+  const loadUaoGridStatus = async () => {
+    try {
+      const res = await callApi<any>("/api/grid/status");
+      setUaoGridStatus(res);
     } catch (e: any) {
       // silent
     }
@@ -860,88 +872,66 @@ export default function App() {
                   <Text style={styles.cardTitle}>{gridWorkerStatus} {gridMetrics?.task && gridMetrics.task !== "Offline" ? `— ${gridMetrics.task}` : ""}</Text>
                 </View>
                 
-                {gridMetrics && (
-                  <View style={{ marginBottom: 16, gap: 4 }}>
-                    <Text style={{ color: colors.muted }}>Par Activo: <Text style={{ color: colors.text }}>{gridMetrics.symbol}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Precio: <Text style={{ color: colors.success }}>{gridMetrics.last_price}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Posiciones Activas: <Text style={{ color: colors.warning }}>{gridMetrics.position_count ?? 0}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Órdenes Abiertas: <Text style={{ color: colors.accent }}>{gridMetrics.open_orders ?? 0}</Text></Text>
-                    <Text style={{ color: colors.muted }}>PnL (Flotante): <Text style={{ color: (gridMetrics.unrealized_pnl ?? 0) >= 0 ? colors.success : colors.danger }}>${gridMetrics.unrealized_pnl?.toFixed(4) ?? "0.0000"}</Text></Text>
-                  </View>
-                )}
+                </Panel>
 
-                {backtestTop10.length > 0 && (
-                  <View style={{ marginTop: 16, gap: 10 }}>
-                    <Text style={styles.sectionTitle}>🏆 Top 3 Backtest (24h)</Text>
-                    {backtestTop10.slice(0, 3).map((result: any, index: number) => {
-                      const isSelected = selectedBacktestSymbol === result.symbol;
-                      const isTop3 = index < 3;
-                      const medals = ["🥇", "🥈", "🥉"];
-                      const borderColors = ["rgba(255,215,0,0.5)", "rgba(192,192,192,0.4)", "rgba(205,127,50,0.35)"];
-                      const bgColors = ["rgba(255,215,0,0.08)", "rgba(192,192,192,0.06)", "rgba(205,127,50,0.05)"];
-                      
-                      return (
-                        <Pressable 
-                          key={result.symbol} 
-                          onPress={() => setSelectedBacktestSymbol(isSelected ? null : result.symbol)}
-                          style={{
-                            padding: 14, borderRadius: 12,
-                            backgroundColor: isTop3 ? (bgColors[index] ?? "rgba(255,255,255,0.03)") : "rgba(255,255,255,0.03)",
-                            borderWidth: 1, borderColor: isTop3 ? (borderColors[index] ?? colors.border) : colors.border,
-                          }}
-                        >
-                          <View style={{ flexDirection: "row", alignItems: "center", marginBottom: isSelected ? 8 : 0, gap: 8 }}>
-                            {isTop3 && <Text style={{ fontSize: 22 }}>{medals[index]}</Text>}
-                            <Text style={[styles.cardTitle, { flex: 1 }]}>{isTop3 ? "" : `#${index + 1} `}{result.symbol}</Text>
-                            <Text style={{ color: result.pnl >= 0 ? colors.success : colors.danger, fontWeight: "700", fontSize: 16 }}>
-                              {result.pnl >= 0 ? "+" : ""}${result.pnl?.toFixed(2)}
-                            </Text>
-                          </View>
-                          
-                          {isSelected && (
-                            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12, marginTop: 8, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.1)", paddingTop: 8 }}>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Total Trades: <Text style={{ color: colors.text }}>{result.total_trades ?? result.trades}</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Long Trades: <Text style={{ color: colors.success }}>{result.long_trades ?? result.trades}</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Short Trades: <Text style={{ color: colors.danger }}>{result.short_trades ?? 0}</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Max Drawdown: <Text style={{ color: colors.danger }}>-{result.drawdown_pct?.toFixed(2)}%</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Profit Factor: <Text style={{ color: colors.text }}>{result.profit_factor?.toFixed(2)}</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>CV: <Text style={{ color: colors.text }}>{result.cv?.toFixed(5)}</Text></Text>
-                              <Text style={{ color: colors.muted, fontSize: 12, width: "45%" }}>Spacing: <Text style={{ color: colors.text }}>{result.spacing_pct?.toFixed(2)}%</Text></Text>
+                <Panel>
+                  <Text style={styles.sectionTitle}>Operación Actual</Text>
+                  {uaoGridStatus ? (
+                    <>
+                      <View style={{ backgroundColor: "#1E1E1E", padding: 16, borderRadius: 8, borderWidth: 1, borderColor: colors.accent, marginBottom: 16 }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>Símbolo</Text>
+                          <Text style={{ color: colors.text, fontSize: 15, fontWeight: "bold" }}>{uaoGridStatus.symbol || 'N/A'}</Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>Precio Actual</Text>
+                          <Text style={{ color: colors.text, fontSize: 15 }}>{gridMetrics?.last_price || 'N/A'}</Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>PnL (Flotante)</Text>
+                          <Text style={{ color: (uaoGridStatus.pnl ?? 0) >= 0 ? colors.success : colors.danger, fontSize: 15, fontWeight: "bold" }}>
+                            ${uaoGridStatus.pnl?.toFixed(4) ?? "0.0000"}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>Posiciones Activas (Grid)</Text>
+                          <Text style={{ color: colors.success, fontSize: 15 }}>
+                            {gridMetrics?.position_count ?? 0}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>Posición Neta</Text>
+                          <Text style={{ color: (uaoGridStatus.net_qty ?? 0) > 0 ? colors.success : colors.danger, fontSize: 15 }}>
+                            {uaoGridStatus.net_qty ?? 0}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                          <Text style={{ color: colors.muted, fontSize: 15 }}>Órdenes Abiertas Totales</Text>
+                          <Text style={{ color: colors.warning, fontSize: 15 }}>{uaoGridStatus.open_orders?.length ?? 0}</Text>
+                        </View>
+                      </View>
+
+                      {uaoGridStatus.open_orders && uaoGridStatus.open_orders.length > 0 && (
+                        <View style={{ marginTop: 8 }}>
+                          <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 8 }]}>Listado de Órdenes (Webhook)</Text>
+                          {uaoGridStatus.open_orders.map((order: any, idx: number) => (
+                            <View key={idx} style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: "rgba(255,255,255,0.05)", padding: 10, borderRadius: 6, marginBottom: 6 }}>
+                              <Text style={{ color: order.side === "BUY" ? colors.success : colors.danger, fontWeight: "bold" }}>
+                                {order.side}
+                              </Text>
+                              <Text style={{ color: colors.text }}>Precio: {order.price}</Text>
+                              <Text style={{ color: colors.muted }}>Cant: {order.qty}</Text>
                             </View>
-                          )}
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-
-                {backtestTop10.length === 0 && backtestResult && (
-                  <View style={{ marginTop: 16, padding: 12, backgroundColor: "rgba(0,255,0,0.05)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(0,255,0,0.2)" }}>
-                    <Text style={styles.sectionTitle}>Mejor Oportunidad Detectada</Text>
-                    <Text style={[styles.cardTitle, { color: colors.success, marginBottom: 8 }]}>Símbolo: {backtestResult.symbol}</Text>
-                    <Text style={{ color: colors.muted }}>Trades Simulados (24h): <Text style={{ color: colors.text }}>{backtestResult.trades}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Ganancia Proyectada: <Text style={{ color: colors.success }}>+${backtestResult.pnl?.toFixed(2)}</Text></Text>
-                    <Text style={{ color: colors.muted }}>Max Drawdown: <Text style={{ color: colors.danger }}>-{backtestResult.drawdown_pct?.toFixed(2)}%</Text></Text>
-                    <Text style={{ color: colors.muted }}>Profit Factor: <Text style={{ color: colors.text }}>{backtestResult.profit_factor?.toFixed(2)}</Text></Text>
-                    <Text style={{ color: colors.muted }}>CV: <Text style={{ color: colors.text }}>{backtestResult.cv?.toFixed(5)}</Text></Text>
-                  </View>
-                )}
-              </Panel>
-
-              <Panel>
-                <Text style={styles.sectionTitle}>Consola en vivo</Text>
-                <View style={{ backgroundColor: "#1E1E1E", padding: 12, borderRadius: 8, minHeight: 200 }}>
-                  {gridLogs.length === 0 ? (
-                    <Text style={{ color: colors.muted, fontFamily: "monospace", fontSize: 12 }}>Esperando logs...</Text>
+                          ))}
+                        </View>
+                      )}
+                    </>
                   ) : (
-                    gridLogs.map((log, index) => (
-                      <Text key={index} style={{ color: "#00FF00", fontFamily: "monospace", fontSize: 12, marginBottom: 4 }}>
-                        {log}
-                      </Text>
-                    ))
+                    <View style={{ backgroundColor: "#1E1E1E", padding: 16, borderRadius: 8 }}>
+                      <Text style={{ color: colors.muted, textAlign: "center" }}>Esperando datos de la operación...</Text>
+                    </View>
                   )}
-                </View>
-              </Panel>
+                </Panel>
             </>
           )}
 
