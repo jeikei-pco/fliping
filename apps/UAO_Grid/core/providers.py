@@ -252,7 +252,7 @@ class ExchangeProvider(ExecutionProvider):
                         "clOrdId": f"glvl{safe_grid_level}x{now}x{i}",
                     }
                     if o.reduce_only:
-                        item["reduceOnly"] = True
+                        item["reduceOnly"] = "true"  # OKX requiere string para este booleano en batch
                     payload.append(item)
                 if payload:
                     logger.info("Creando %d ordenes batch", len(payload))
@@ -320,7 +320,7 @@ class ExchangeProvider(ExecutionProvider):
                 logger.error(f"Fallo close-position nativo, usando fallback: {e}")
                 
             self.exchange.create_order(symbol=symbol, type="market", side=close_side, amount=p.qty,
-                                       params={"reduceOnly": True, "tdMode": "cross"})
+                                       params={"reduceOnly": "true", "tdMode": "cross"})
         except Exception as exc:
             logger.error("Error close_position_market: %s", exc)
 

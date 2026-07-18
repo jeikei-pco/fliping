@@ -26,7 +26,7 @@ class GridEngine:
         # Parámetros Base
         # La cantidad total de líneas se divide a la mitad (para buy y sell)
         total_configurado = int(os.getenv("GRID_NUM_LINEAS_LADO", 10))
-        self.num_lineas_lado = max(1, total_configurado // 2)
+        self.num_lineas_lado = max(1, total_configurado)
         self.max_proximity_orders = int(os.getenv("GRID_PROXIMITY_ORDERS", 2))
         self.atr_multiplicador = float(os.getenv("GRID_ATR_MULTIPLIER", 1.5))
         
