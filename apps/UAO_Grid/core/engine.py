@@ -122,10 +122,11 @@ class GridEngine:
             if abs(self.espaciado_actual - nuevo_espaciado) > 1e-5:
                 self.espaciado_actual = nuevo_espaciado
                 
-                cobertura_deseada = 0.04 
+                cobertura_deseada = 0.10 
                 lineas_calculadas_totales = int(cobertura_deseada / self.espaciado_actual)
                 # Dividir a la mitad (sell y buy)
-                self.num_lineas_lado = max(2, lineas_calculadas_totales // 2)
+                # Priorizar el valor de la IA (self.num_lineas_lado) si es mayor que la cobertura mínima de seguridad
+                self.num_lineas_lado = max(self.num_lineas_lado, max(2, lineas_calculadas_totales // 2))
                 self._recalcular_inversion_por_nivel()
                 self._hubo_cambio_atr = True
                 
@@ -183,9 +184,10 @@ class GridEngine:
             
         return False
 
-    def inicializar_grid(self, precio_base: float):
+    def inicializar_grid(self, precio_base: float, num_grids_sugerido: int = 10):
         """Crea la malla alrededor del precio base respetando los Take Profits activos."""
         self.centro_grid = precio_base
+        self.num_lineas_lado = max(1, num_grids_sugerido // 2)
         self._recalcular_inversion_por_nivel()
 
         # 1. Salvar los Take Profits activos (niveles >= 100)
@@ -365,7 +367,7 @@ class GridEngine:
 
     def _desplazar_grid(self, nuevo_centro: float):
         """Re-inicializa la malla centrada en el nuevo precio."""
-        self.inicializar_grid(nuevo_centro)
+        self.inicializar_grid(nuevo_centro, num_grids_sugerido=self.num_lineas_lado * 2)
 
     # ── ESTADO Y ORDENES ──
 
@@ -382,7 +384,7 @@ class GridEngine:
         self.precio_promedio = posicion.entry_price
         # [NUEVO] Re-generar la malla para adaptarnos a la posición forzada
         if abs(self.posicion_neta) > 1e-9:
-            self.inicializar_grid(self.precio_promedio)
+            self.inicializar_grid(self.precio_promedio, num_grids_sugerido=self.num_lineas_lado * 2)
         else:
             self.niveles = []
 

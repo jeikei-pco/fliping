@@ -41,18 +41,14 @@ class Order:
         if not isinstance(other, Order):
             return False
         # Tolerancia de +/- 1 tick aproximado (0.05% del precio)
-        price_diff = abs(self.price - other.price)
-        price_match = price_diff <= (self.price * 0.0005)
+        price_match = abs(self.price - other.price) <= (self.price * 0.0005)
         
-        # Ignoramos variaciones menores de cantidad (hasta 5%) que puedan surgir de redondeos
-        qty_diff = abs(self.qty - other.qty)
-        qty_match = qty_diff <= (self.qty * 0.05)
-
+        # ✅ FIX: Eliminamos la validación de qty_match para soportar partial fills
+        # Las órdenes de grid se identifican por precio y lado.
         return (
             self.symbol == other.symbol
             and self.side == other.side
             and price_match
-            and qty_match
             and self.reduce_only == other.reduce_only
         )
 
@@ -167,10 +163,8 @@ class ExchangeProvider(ExecutionProvider):
             raw = [self.exchange.fetch_position(symbol)] if symbol else self.exchange.fetch_positions()
             result: List[Position] = []
             for p in raw:
-                # ── FIX: Ignorar si CCXT devuelve None ──
                 if not p:
                     continue
-                # ────────────────────────────────────────
                 contracts = float(p.get("contracts") or 0.0)
                 raw_pos = float(p.get("info", {}).get("pos") or contracts)
                 if abs(contracts) <= 0:
@@ -205,7 +199,7 @@ class ExchangeProvider(ExecutionProvider):
                     price=float(o.get("price") or 0.0),
                     qty=float(o.get("amount") or 0.0),
                     status=str(o.get("status") or "OPEN").upper(),
-                    reduce_only=bool(o.get("reduceOnly") or o.get("info", {}).get("reduceOnly")),
+                    reduce_only=str(o.get("reduceOnly") or o.get("info", {}).get("reduceOnly", "")).lower() == "true",
                     grid_level=grid_level,
                 ))
             return result
@@ -236,6 +230,8 @@ class ExchangeProvider(ExecutionProvider):
                 if payload:
                     logger.info("Cancelando %d ordenes batch", len(payload))
                     self.exchange.private_post_trade_cancel_batch_orders(payload)
+                    # ✅ FIX: Anti-Baneo Rate Limit
+                    time.sleep(0.5)
 
             for chunk in _chunked(a_crear, 20):
                 payload = []
@@ -252,11 +248,13 @@ class ExchangeProvider(ExecutionProvider):
                         "clOrdId": f"glvl{safe_grid_level}x{now}x{i}",
                     }
                     if o.reduce_only:
-                        item["reduceOnly"] = "true"  # OKX requiere string para este booleano en batch
+                        item["reduceOnly"] = "true"
                     payload.append(item)
                 if payload:
                     logger.info("Creando %d ordenes batch", len(payload))
                     self.exchange.private_post_trade_batch_orders(payload)
+                    # ✅ FIX: Anti-Baneo Rate Limit
+                    time.sleep(0.5)
         except Exception as exc:
             if "51155" in str(exc):
                 raise exc
@@ -281,6 +279,8 @@ class ExchangeProvider(ExecutionProvider):
 
                 if payload:
                     self.exchange.private_post_trade_cancel_batch_orders(payload)
+                    # ✅ FIX: Anti-Baneo Rate Limit
+                    time.sleep(0.5)
             if abiertas:
                 logger.info("Canceladas %d ordenes de %s", len(abiertas), symbol)
         except Exception as exc:
@@ -296,12 +296,11 @@ class ExchangeProvider(ExecutionProvider):
             logger.critical("Cerrando posicion a mercado: %s qty=%s side=%s", symbol, p.qty, close_side)
             
             try:
-                # Usar endpoint nativo de OKX (100% cierre, sin errores de precision)
                 market = self.exchange.market(symbol)
                 payload = {
                     "instId": market["id"],
                     "mgnMode": "cross",
-                    "posSide": "net"  # Por defecto muchas cuentas OKX están en modo 'net'
+                    "posSide": "net"
                 }
                 try:
                     self.exchange.private_post_trade_close_position(payload)
@@ -309,7 +308,6 @@ class ExchangeProvider(ExecutionProvider):
                     return
                 except Exception as e_net:
                     if "51006" in str(e_net) or "posSide" in str(e_net):
-                        # 51006 o error de posSide indica que la cuenta está en modo long/short
                         payload["posSide"] = "long" if p.side == "LONG" else "short"
                         self.exchange.private_post_trade_close_position(payload)
                         logger.info(f"Posición cerrada vía OKX API (long/short): {payload}")
@@ -319,8 +317,9 @@ class ExchangeProvider(ExecutionProvider):
             except Exception as e:
                 logger.error(f"Fallo close-position nativo, usando fallback: {e}")
                 
+            # ✅ FIX: Booleano nativo True para CCXT
             self.exchange.create_order(symbol=symbol, type="market", side=close_side, amount=p.qty,
-                                       params={"reduceOnly": "true", "tdMode": "cross"})
+                                       params={"reduceOnly": True, "tdMode": "cross"})
         except Exception as exc:
             logger.error("Error close_position_market: %s", exc)
 
@@ -339,14 +338,10 @@ class ExchangeProvider(ExecutionProvider):
             logger.warning("No se pudo ajustar apalancamiento para %s (puede que ya este configurado): %s", symbol, exc)
 
 
-# === ARQUITECTURA DE PUERTOS Y ADAPTADORES ===
-
 class OKXRealAdapter(ExchangeProvider):
-    """Adaptador de ejecución estricto para entorno REAL."""
     def __init__(self, exchange: Optional[ccxt.Exchange] = None):
         super().__init__(mode="REAL", exchange=exchange)
 
 class OKXDemoAdapter(ExchangeProvider):
-    """Adaptador de ejecución estricto para entorno DEMO."""
     def __init__(self, exchange: Optional[ccxt.Exchange] = None):
         super().__init__(mode="DEMO", exchange=exchange)

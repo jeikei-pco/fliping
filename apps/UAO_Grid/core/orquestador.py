@@ -637,7 +637,12 @@ class GridOrquestador:
                     
                     # Inicializar grid en el primer tick real si no hay niveles
                     if not self.engine.niveles:
-                        self.engine.inicializar_grid(precio_actual)
+                        grids_sugeridos = 10
+                        if hasattr(self, 'mejor_params') and self.mejor_params and self.mejor_params.get("symbol") == symbol:
+                            grids_sugeridos = self.mejor_params.get("num_grids", 10)
+                            
+                        self.engine.modo_drenaje = False 
+                        self.engine.inicializar_grid(precio_actual, num_grids_sugerido=grids_sugeridos)
                         
                     self.watchdog.actualizar_precio_ws(precio_actual)
                     
@@ -927,9 +932,11 @@ class GridOrquestador:
             logger.info("💹 Ejecutando Backtest dinámico sobre Top N...")
             capital = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 5.0))
             leverage = float(os.getenv("GRID_LEVERAGE", 15.0))
-            bt_resultados = backtest_grid_top(self.exchange, top_syms, self.timeframe, self.limit, capital, leverage)
+            # ✅ FIX: Nueva firma del backtester (maneja temporalidades internamente)
+            bt_resultados = backtest_grid_top(self.exchange, top_syms, capital, leverage)
             
             if bt_resultados:
+                self.mejor_params = bt_resultados[0]
                 return bt_resultados[0]["symbol"]
             return top_syms[0]
         except Exception as e:
