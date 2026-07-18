@@ -22,6 +22,7 @@ class GridEngine:
         
         self.posicion_neta = 0.0
         self.precio_promedio = 0.0
+        self.modo_estrategia = "NEUTRAL"
         
         # Parámetros Base
         # La cantidad total de líneas se divide a la mitad (para buy y sell)
@@ -86,7 +87,7 @@ class GridEngine:
         # Inversión real por línea * apalancamiento = Tamaño total de la orden a enviar al exchange
         self.inversion_por_nivel = (self.capital_inicial / total_lineas) * self.leverage
 
-    def calcular_espaciado_atr(self, df_5m: pd.DataFrame, market_info: dict = {}):
+    def calcular_espaciado_atr(self, df_5m: pd.DataFrame, market_info: dict = {}, precio_vivo: float = None):
         """Calcula el spread dinámico permitiendo expansión y contracción seguras."""
         if df_5m is None or len(df_5m) < 15:
             return
@@ -104,7 +105,7 @@ class GridEngine:
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         
-        precio_actual = close.iloc[-1]
+        precio_actual = precio_vivo if precio_vivo else close.iloc[-1]
         if precio_actual > 0 and atr > 0:
             espaciado_calculado = (atr * self.atr_multiplicador) / precio_actual
             
@@ -116,17 +117,14 @@ class GridEngine:
             self.min_spread_rentable = (fee_maker + fee_taker) + 0.0015
             max_spread = 0.0080  # Techo: 0.80%
             
+            if hasattr(self, 'espaciado_optimo') and self.espaciado_optimo > 0:
+                espaciado_calculado = self.espaciado_optimo
+            
             # El espaciado nunca podrá ser menor a lo que garantiza ganancia real
             nuevo_espaciado = max(self.min_spread_rentable, min(espaciado_calculado, max_spread))
             
             if abs(self.espaciado_actual - nuevo_espaciado) > 1e-5:
                 self.espaciado_actual = nuevo_espaciado
-                
-                cobertura_deseada = 0.10 
-                lineas_calculadas_totales = int(cobertura_deseada / self.espaciado_actual)
-                # Dividir a la mitad (sell y buy)
-                # Priorizar el valor de la IA (self.num_lineas_lado) si es mayor que la cobertura mínima de seguridad
-                self.num_lineas_lado = max(self.num_lineas_lado, max(2, lineas_calculadas_totales // 2))
                 self._recalcular_inversion_por_nivel()
                 self._hubo_cambio_atr = True
                 
@@ -184,8 +182,19 @@ class GridEngine:
             
         return False
 
-    def inicializar_grid(self, precio_base: float, num_grids_sugerido: int = 10):
-        """Crea la malla alrededor del precio base respetando los Take Profits activos."""
+    def inicializar_grid(self, precio_base: float, num_grids_sugerido: int = 10, modo: str = None):
+        """Crea la malla alrededor del precio base respetando los Take Profits activos y la estrategia direccional."""
+        if modo is not None:
+            modo_anterior = getattr(self, "modo_estrategia", "NEUTRAL")
+            self.modo_estrategia = modo.upper()
+            
+            # Pausa de seguridad al cambiar de dirección opuesta
+            if modo_anterior in ["LONG", "SHORT"] and self.modo_estrategia in ["LONG", "SHORT"] and modo_anterior != self.modo_estrategia:
+                logger.warning(f"⏳ Pausa de Seguridad: Cambiando modo de {modo_anterior} a {self.modo_estrategia}. Esperando 3s para sincronización con el exchange...")
+                time.sleep(3.0)
+                
+        modo_uso = getattr(self, "modo_estrategia", "NEUTRAL")
+        
         self.centro_grid = precio_base
         self.num_lineas_lado = max(1, num_grids_sugerido // 2)
         self._recalcular_inversion_por_nivel()
@@ -214,11 +223,12 @@ class GridEngine:
         margen_seguro = getattr(self, 'min_spread_rentable', 0.0025)
 
         for i in range(1, self.num_lineas_lado + 1):
-            if i not in niveles_cubiertos:
+            if i not in niveles_cubiertos and modo_uso in ["NEUTRAL", "SHORT"]:
                 # LÓGICA ANTI-PÉRDIDAS PARA LONG: El precio base para vender (TP) 
-                # NUNCA debe estar por debajo del precio promedio + margen seguro.
-                if self.posicion_neta > 1e-9 and self.precio_promedio > 0:
-                    piso_rentable = self.precio_promedio * (1 + margen_seguro)
+                # se calcula ahora desde el precio actual (centro_grid) en lugar del promedio,
+                # permitiendo cerrar en pérdida si el precio se desplaza y el grid lo requiere.
+                if self.posicion_neta > 1e-9:
+                    piso_rentable = self.centro_grid * (1 + margen_seguro)
                     base_sell = max(self.centro_grid, piso_rentable)
                 else:
                     base_sell = self.centro_grid
@@ -227,11 +237,11 @@ class GridEngine:
                 qty_sell = self.inversion_por_nivel / precio_sell
                 self.niveles.append({"side": "SELL", "price": precio_sell, "qty": qty_sell, "level": i})
 
-            if -i not in niveles_cubiertos:
+            if -i not in niveles_cubiertos and modo_uso in ["NEUTRAL", "LONG"]:
                 # LÓGICA ANTI-PÉRDIDAS PARA SHORT: El precio base para comprar (TP)
-                # NUNCA debe estar por encima del precio promedio - margen seguro.
-                if self.posicion_neta < -1e-9 and self.precio_promedio > 0:
-                    techo_rentable = self.precio_promedio * (1 - margen_seguro)
+                # se calcula ahora desde el precio actual (centro_grid) en lugar del promedio.
+                if self.posicion_neta < -1e-9:
+                    techo_rentable = self.centro_grid * (1 - margen_seguro)
                     base_buy = min(self.centro_grid, techo_rentable)
                 else:
                     base_buy = self.centro_grid
@@ -394,7 +404,14 @@ class GridEngine:
         Retorna todos los niveles calculados para que las órdenes descansen en OKX.
         """
         if not self.niveles or self.kill_switch_activado:
+            if not self.kill_switch_activado and hasattr(self, 'modo_estrategia'):
+                # Evitar spammear el log cada iteración. Usar el flag _out_of_range_log
+                if not getattr(self, '_out_of_range_log', False):
+                    logger.info(f"Modo [{self.modo_estrategia}]: Fuera de rango de compra/venta o sin órdenes disponibles.")
+                    self._out_of_range_log = True
             return []
+            
+        self._out_of_range_log = False
 
         # Si estamos en modo drenaje, generar órdenes de drenaje
         if self.modo_drenaje:
@@ -490,11 +507,11 @@ class GridEngine:
         else:
             logger.warning(f"   ⚠️ [MALLA] No se encontró el nivel para el fill (side={side}, price={price}, id={level_id})")
 
-        # === NUEVO: RESET ON FLAT (Reubicación de Malla) ===
-        # Si la operación que acaba de ocurrir nos deja sin posición en el mercado,
-        # forzamos un reajuste pendiente. El orquestador verá esto en el próximo tick
-        # y re-dibujará la malla usando el precio actual y el ATR más fresco.
+        # === NUEVO: RESET ON FLAT (Reubicación de Malla) DESACTIVADO ===
+        # A petición del usuario, si la operación que acaba de ocurrir nos deja sin posición en el mercado,
+        # NO forzamos un reajuste pendiente. La malla persiste para evitar cancelar y recrear
+        # órdenes innecesariamente.
         if abs(self.posicion_neta) < 1e-9:
-            logger.info("🎯 [GRID AUTÓNOMO] Inventario en 0. Solicitando re-ubicación completa de las líneas de compra y venta (Reset on Flat).")
-            self._reajuste_pendiente = True
+            logger.info("🎯 [GRID AUTÓNOMO] Inventario en 0. Manteniendo la malla actual intacta (Reset on Flat desactivado).")
+            # self._reajuste_pendiente = True
         # ===================================================

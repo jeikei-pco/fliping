@@ -14,6 +14,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import * as LocalAuthentication from 'expo-local-authentication';
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -141,7 +142,7 @@ const defaultFlippingEngines: FlippingEngineStatus[] = [
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("login");
-  const [apiBaseUrl, setApiBaseUrl] = useState("http://[2800:484:a480:9b50:bc18:4d55:828:5436]:4000");
+  const [apiBaseUrl, setApiBaseUrl] = useState("http://127.0.0.1:4000");
   const [email, setEmail] = useState("operator@jk.local");
   const [password, setPassword] = useState("123456");
   const [userLabel, setUserLabel] = useState("JK Operator");
@@ -163,6 +164,38 @@ export default function App() {
   const [openRouterApiKey, setOpenRouterApiKey] = useState("");
   const [firecrawlApiKey, setFirecrawlApiKey] = useState("");
   const [providerStatuses, setProviderStatuses] = useState<ProviderStatus[]>([]);
+
+  useEffect(() => {
+    const checkSession = async () => {
+      try {
+        const storedToken = await AsyncStorage.getItem("authToken");
+        if (storedToken) {
+          const hasHardware = await LocalAuthentication.hasHardwareAsync();
+          const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+          
+          if (hasHardware && isEnrolled) {
+            const auth = await LocalAuthentication.authenticateAsync({
+              promptMessage: "Autenticación requerida para acceder",
+              cancelLabel: "Cancelar",
+            });
+            if (auth.success) {
+              setToken(storedToken);
+              setScreen("dashboard");
+              return;
+            } else {
+              return; // Si cancela, se queda en la pantalla de login
+            }
+          }
+          // Si no tiene biometría configurada, pero tiene token, auto login
+          setToken(storedToken);
+          setScreen("dashboard");
+        }
+      } catch (err) {
+        console.log("Error checking session", err);
+      }
+    };
+    void checkSession();
+  }, []);
 
   useEffect(() => {
     const cred = credentials.find(c => c.provider === activeExchange && c.sandbox === activeSandbox);
@@ -189,8 +222,8 @@ export default function App() {
   const [gridLogs, setGridLogs] = useState<string[]>([]);
   const [gridMetrics, setGridMetrics] = useState<any>(null);
   const [backtestResult, setBacktestResult] = useState<any>(null);
-  const [backtestTop10, setBacktestTop10] = useState<any[]>([]);
   const [selectedBacktestSymbol, setSelectedBacktestSymbol] = useState<string | null>(null);
+  const [backtestTop10, setBacktestTop10] = useState<any[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [showGridConfig, setShowGridConfig] = useState(false);
   const [uaoGridStatus, setUaoGridStatus] = useState<any>(null);
@@ -228,8 +261,13 @@ export default function App() {
   }, [balances]);
 
   useEffect(() => {
+    let dashboardInterval: ReturnType<typeof setInterval>;
     if (screen === "dashboard") {
-      void Promise.all([loadEngineConfig(), loadCredentials(), loadBalances(), loadEngineStatus(), loadFlippingEngines()]);
+      void Promise.all([loadEngineConfig(), loadCredentials(), loadBalances(), loadEngineStatus(), loadFlippingEngines(), loadGridMetrics(), loadUaoGridStatus()]);
+      dashboardInterval = setInterval(() => {
+        void loadGridMetrics();
+        void loadUaoGridStatus();
+      }, 5000); // Polling cada 5s en dashboard para el Top 5 en vivo
     }
     if (screen === "alerts") {
       void loadAlerts();
@@ -256,6 +294,7 @@ export default function App() {
     
     return () => {
       if (gridInterval) clearInterval(gridInterval);
+      if (dashboardInterval) clearInterval(dashboardInterval);
     };
   }, [screen]);
 
@@ -287,26 +326,23 @@ export default function App() {
   // ─── Handlers Sprint 1 & 2 ────────────────────────────────────────────────
 
   const handleLogin = async (offline = false) => {
-    setLoading(true);
-    try {
-      if (!offline) {
-        if (isRegistering) {
-          const result = await callApi<{ token: string; user: { displayName: string } }>("/api/auth/register", {
-            method: "POST",
-            body: JSON.stringify({ email, password, displayName }),
-          });
-          setToken(result.token);
-          setUserLabel(result.user.displayName);
-        } else {
-          const result = await callApi<{ token: string; user: { displayName: string } }>("/api/auth/login", {
-            method: "POST",
-            body: JSON.stringify({ email, password }),
-          });
-          setToken(result.token);
-          setUserLabel(result.user.displayName);
-        }
-      }
+    if (offline) {
+      setToken("offline-token");
       setScreen("dashboard");
+      return;
+    }
+    try {
+      setLoading(true);
+      const result = await callApi<{ token: string; user: { displayName: string } }>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      if (result.token) {
+        setToken(result.token);
+        setDisplayName(result.user?.displayName || "User");
+        await AsyncStorage.setItem("authToken", result.token);
+        setScreen("dashboard");
+      }
     } catch (error) {
       Alert.alert("Login", error instanceof Error ? error.message : "No se pudo iniciar sesión.");
     } finally {
@@ -612,25 +648,11 @@ export default function App() {
           </Text>
 
           <Panel>
-            <Text style={styles.sectionTitle}>Conexión API</Text>
-            <Field label="Base URL del backend" value={apiBaseUrl} onChangeText={setApiBaseUrl} autoCapitalize="none" />
-            <Text style={styles.helper}>
-              En emulador Android usa `http://10.0.2.2:4000`. En dispositivo físico cambia a tu IP local.
-            </Text>
-          </Panel>
-
-          <Panel>
-            <Text style={styles.sectionTitle}>{isRegistering ? "Crear Cuenta" : "Login"}</Text>
-            {isRegistering && (
-              <Field label="Nombre (Display Name)" value={displayName} onChangeText={setDisplayName} />
-            )}
+            <Text style={styles.sectionTitle}>Login</Text>
             <Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" />
             <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
             <Pressable style={styles.primaryButton} onPress={() => void handleLogin(false)}>
-              <Text style={styles.primaryButtonText}>{isRegistering ? "Registrarse" : "Entrar con backend"}</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={() => setIsRegistering(!isRegistering)}>
-              <Text style={styles.secondaryButtonText}>{isRegistering ? "¿Ya tienes cuenta? Inicia sesión" : "¿No tienes cuenta? Regístrate"}</Text>
+              <Text style={styles.primaryButtonText}>Iniciar Sesión</Text>
             </Pressable>
             <Pressable style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => void handleLogin(true)}>
               <Text style={styles.secondaryButtonText}>Entrar en demo local</Text>
@@ -940,7 +962,19 @@ export default function App() {
             <>
               <Panel>
                 <Text style={styles.sectionTitle}>Resumen financiero</Text>
-                <Text style={styles.bigNumber}>{totalCapital.toFixed(2)}</Text>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <Text style={styles.bigNumber}>${totalCapital.toFixed(2)}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                    <Text style={{ color: colors.muted, fontSize: 14 }}>PnL 24h:</Text>
+                    <Text style={{ 
+                      color: (uaoGridStatus?.position?.pnl ?? 0) >= 0 ? colors.success : colors.danger,
+                      fontSize: 16,
+                      fontWeight: "bold" 
+                    }}>
+                      {(uaoGridStatus?.position?.pnl ?? 0) >= 0 ? "+" : ""}{(uaoGridStatus?.position?.pnl ?? 0).toFixed(2)}
+                    </Text>
+                  </View>
+                </View>
                 <Text style={styles.helper}>{balances?.note ?? "Capital consolidado desde OKX."}</Text>
                 <View style={styles.inlineButtons}>
                   <Pressable style={styles.secondaryButtonCompact} onPress={() => void loadBalances()}>
@@ -979,15 +1013,44 @@ export default function App() {
                         <Text style={styles.cardMeta}>Estado: {gridWorkerStatus}</Text>
                         {backtestTop10.length > 0 ? (
                           <View style={{ marginTop: 12, padding: 8, backgroundColor: "rgba(0,255,0,0.05)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(0,255,0,0.2)", gap: 6 }}>
-                            <Text style={[styles.cardTitle, { color: colors.success, marginBottom: 2 }]}>🏆 Top 3 Backtest</Text>
-                            {backtestTop10.slice(0, 3).map((r: any, i: number) => {
-                              const medals = ["🥇", "🥈", "🥉"];
+                            <Text style={[styles.cardTitle, { color: colors.success, marginBottom: 2 }]}>🏆 Top 5 Backtest</Text>
+                            {backtestTop10.slice(0, 5).map((r: any, i: number) => {
+                              const medals = ["🥇", "🥈", "🥉", "🏅", "🏅"];
+                              const isSelected = selectedBacktestSymbol === r.symbol;
                               return (
-                                <View key={r.symbol} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                                  <Text style={{ color: colors.text, fontSize: 13 }}>{medals[i]} {r.symbol}</Text>
-                                  <Text style={{ color: r.pnl >= 0 ? colors.success : colors.danger, fontSize: 13, fontWeight: "700" }}>
-                                    {r.pnl >= 0 ? "+" : ""}${r.pnl?.toFixed(2)}
-                                  </Text>
+                                <View key={r.symbol}>
+                                  <Pressable
+                                    onPress={() => setSelectedBacktestSymbol(isSelected ? null : r.symbol)}
+                                    style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4 }}
+                                  >
+                                    <Text style={{ color: isSelected ? colors.success : colors.text, fontSize: 13, fontWeight: isSelected ? "bold" : "normal" }}>
+                                      {medals[i]} {r.symbol}
+                                    </Text>
+                                    <Text style={{ color: r.pnl >= 0 ? colors.success : colors.danger, fontSize: 13, fontWeight: "700" }}>
+                                      {r.pnl >= 0 ? "+" : ""}${r.pnl?.toFixed(2)}
+                                    </Text>
+                                  </Pressable>
+                                  {isSelected && (
+                                    <View style={{ backgroundColor: "#1e293b", padding: 8, borderRadius: 6, marginTop: 4, marginBottom: 8, borderWidth: 1, borderColor: "#334155" }}>
+                                      <Text style={{ color: colors.muted, fontSize: 11, marginBottom: 4 }}>📊 Detalles de la Simulación</Text>
+                                      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>Modo:</Text>
+                                        <Text style={{ color: r.modo === "LONG" ? colors.success : r.modo === "SHORT" ? colors.danger : colors.warning, fontSize: 12, fontWeight: "bold" }}>{r.modo || "NEUTRAL"}</Text>
+                                      </View>
+                                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 2 }}>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>Apalancamiento:</Text>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>{r.apalancamiento || 1}x</Text>
+                                      </View>
+                                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 2 }}>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>Distancia Grid:</Text>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>{r.espaciado_pct ? (r.espaciado_pct * 100).toFixed(2) : "N/A"}%</Text>
+                                      </View>
+                                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 2 }}>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>Timeframe:</Text>
+                                        <Text style={{ color: colors.text, fontSize: 12 }}>{r.timeframe || "15m"}</Text>
+                                      </View>
+                                    </View>
+                                  )}
                                 </View>
                               );
                             })}

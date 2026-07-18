@@ -131,6 +131,25 @@ class Database:
                     )
                 ''')
 
+                # Tabla de Historial ML para configuraciones
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ml_history (
+                        session_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        analyzer_metrics TEXT NOT NULL,
+                        math_params TEXT NOT NULL,
+                        ai_factors TEXT NOT NULL,
+                        pnl REAL DEFAULT 0.0,
+                        win_rate REAL DEFAULT 0.0,
+                        profit_factor REAL DEFAULT 0.0,
+                        total_trades INTEGER DEFAULT 0,
+                        wins INTEGER DEFAULT 0,
+                        gross_profit REAL DEFAULT 0.0,
+                        gross_loss REAL DEFAULT 0.0
+                    )
+                ''')
+
                 conn.commit()
                 logger.info(f"📁 Base de datos inicializada en {self.db_path}")
 
@@ -227,6 +246,47 @@ class Database:
                 ''', (trade_id, symbol, side, price, qty, pnl, fee, dt_str))
                 conn.commit()
 
+    def create_ml_session(self, session_id: str, symbol: str, analyzer_metrics: dict, math_params: dict, ai_factors: dict):
+        """Crea una sesión de ML para asociar un rendimiento empírico a un setup teórico."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO ml_history (session_id, symbol, analyzer_metrics, math_params, ai_factors)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (session_id, symbol, json.dumps(analyzer_metrics), json.dumps(math_params), json.dumps(ai_factors)))
+                conn.commit()
+
+    def update_ml_session_trade(self, symbol: str, pnl: float):
+        """Actualiza el PnL, Win Rate y Profit Factor de la última sesión activa del símbolo."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT session_id, total_trades, wins, gross_profit, gross_loss, pnl 
+                    FROM ml_history 
+                    WHERE symbol=? 
+                    ORDER BY started_at DESC LIMIT 1
+                ''', (symbol,))
+                row = cursor.fetchone()
+                if row:
+                    sid = row["session_id"]
+                    t_trades = row["total_trades"] + 1
+                    t_pnl = row["pnl"] + pnl
+                    wins = row["wins"] + (1 if pnl > 0 else 0)
+                    g_profit = row["gross_profit"] + (pnl if pnl > 0 else 0)
+                    g_loss = row["gross_loss"] + (abs(pnl) if pnl < 0 else 0)
+                    
+                    win_rate = round((wins / t_trades) * 100, 2) if t_trades > 0 else 0.0
+                    profit_factor = round((g_profit / g_loss), 2) if g_loss > 0 else (99.0 if g_profit > 0 else 0.0)
+                    
+                    cursor.execute('''
+                        UPDATE ml_history 
+                        SET total_trades=?, wins=?, gross_profit=?, gross_loss=?, pnl=?, win_rate=?, profit_factor=?
+                        WHERE session_id=?
+                    ''', (t_trades, wins, g_profit, g_loss, t_pnl, win_rate, profit_factor, sid))
+                    conn.commit()
+
     def save_scanner_state(self, ranking: List[Dict[str, Any]], cycle_count: int):
         """Guarda el último resultado del scanner."""
         with self._lock:
@@ -241,6 +301,19 @@ class Database:
                         last_cycle_ts=excluded.last_cycle_ts
                 ''', (json.dumps(ranking), cycle_count, datetime.utcnow().isoformat()))
                 conn.commit()
+
+    def get_scanner_state(self) -> Optional[List[Dict[str, Any]]]:
+        """Obtiene el último resultado guardado del scanner."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ranking_json FROM scanner_state WHERE id=1")
+            row = cursor.fetchone()
+            if row and row["ranking_json"]:
+                try:
+                    return json.loads(row["ranking_json"])
+                except Exception:
+                    return None
+            return None
 
     # ── METODOS DE LECTURA (RECUPERACION) ──
 

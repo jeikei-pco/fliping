@@ -458,6 +458,22 @@ export const createHttpApp = (services: {
     }
   });
 
+  app.post("/api/webhook/backtest", async (request, response) => {
+    try {
+      const data = request.body;
+      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+      // Mapeamos pnl_neto a pnl para mantener compatibilidad con el UI existente, si es necesario, aunque lo enviaremos limpio
+      const mappedData = Array.isArray(data) ? data.map((item: any) => ({
+        ...item,
+        pnl: item.pnl_neto || item.pnl || 0
+      })) : data;
+      await gridRedisConnection.set("grid:backtest_top10", JSON.stringify(mappedData));
+      response.json({ success: true });
+    } catch (error: any) {
+      response.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   app.get("/api/grid/status", async (_request, response) => {
     try {
       const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");

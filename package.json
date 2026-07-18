@@ -21,5 +21,8 @@
   ],
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "expo-local-authentication": "^57.0.1"
+  }
 }

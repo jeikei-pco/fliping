@@ -81,7 +81,8 @@ def _simular_grid_dinamico(df: pd.DataFrame, params: Dict[str, Any], capital: fl
 # ==========================================
 # 2. ORQUESTADOR DE BACKTEST (20 Horas / 5m y 15m)
 # ==========================================
-def _backtest_grid_simbolo(exchange: Any, symbol: str, capital: float, leverage: float, slippage_pct: float) -> Dict[str, Any]:
+def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: float, leverage_maximo: float, slippage_pct: float, ia_overrides: Dict[str, Any] = None) -> Dict[str, Any]:
+    symbol = analisis["symbol"]
     # 20 horas = 1200 minutos. 5m = 240 velas, 15m = 80 velas.
     configuraciones = [("5m", 240), ("15m", 80)]
     mejor_resultado_global = None
@@ -89,52 +90,76 @@ def _backtest_grid_simbolo(exchange: Any, symbol: str, capital: float, leverage:
     market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
     fee_maker = float(market.get("maker", 0.00020))
     fee_taker = float(market.get("taker", 0.00050))
-    optimizador = OptimizadorGrid()
+    
+    # Inicializamos el nuevo optimizador con el apalancamiento máximo permitido
+    optimizador = OptimizadorGrid(max_leverage=int(leverage_maximo), overrides=ia_overrides)
 
     for timeframe, limit in configuraciones:
         try:
             velas = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not velas or len(velas) < (limit // 2): continue
+            if not velas or len(velas) < (limit // 2): 
+                continue
                 
             df = pd.DataFrame(velas, columns=["timestamp", "open", "high", "low", "close", "volume"])
             
-            df["rango_vela_pct"] = (df["high"] - df["low"]) / df["open"]
-            datos_analisis = {
-                "symbol": symbol,
-                "precio_actual": df["close"].iloc[-1],
-                "rango_pct_mediano": df["rango_vela_pct"].median(),
-                "deriva_real_pct": (df["high"].max() - df["low"].min()) / df["low"].min()
-            }
-            
-            for modo in ["neutral", "long", "short"]:
-                params = optimizador.calcular_parametros(datos_analisis, modo=modo)
-                res = _simular_grid_dinamico(df, params, capital, leverage, fee_maker, fee_taker, slippage_pct)
-                res["modo_optimo"] = modo.upper()
-                res["timeframe_optimo"] = timeframe
+            # Probar los 3 escenarios direccionales
+            for modo in ["NEUTRAL", "LONG", "SHORT"]:
+                # 1. Obtenemos la configuración dinámica (riesgo, grid, apalancamiento)
+                params_optimos = optimizador.optimizar_symbol(symbol, df, capital, analisis, modo=modo)
                 
+                if not params_optimos.get("valido", False):
+                    continue
+
+                # 2. Simulamos la ejecución con el apalancamiento seguro calculado
+                res = _simular_grid_dinamico(
+                    df=df, 
+                    params=params_optimos, 
+                    capital=capital, 
+                    leverage=params_optimos["apalancamiento"], 
+                    fee_maker=fee_maker, 
+                    fee_taker=fee_taker, 
+                    slippage_pct=slippage_pct
+                )
+                
+                # 3. Consolidar resultados
+                res["modo_optimo"] = modo
+                res["timeframe_optimo"] = timeframe
+                res["apalancamiento_usado"] = params_optimos["apalancamiento"]
+                res["num_grids"] = params_optimos["num_grids"]
+                res["params_optimos"] = params_optimos
+                
+                # Guardar el ganador absoluto basado en PNL
                 if mejor_resultado_global is None or res["pnl_neto"] > mejor_resultado_global["pnl_neto"]:
                     mejor_resultado_global = res
+                    
         except Exception as e:
             logger.debug(f"Error en {symbol} {timeframe}: {e}")
             continue
 
+    # Retornar el diccionario estructurado para el orquestador
     if mejor_resultado_global:
         return {
             "symbol": symbol,
             "timeframe": mejor_resultado_global["timeframe_optimo"],
             "modo": mejor_resultado_global["modo_optimo"],
+            "apalancamiento": mejor_resultado_global["apalancamiento_usado"],
             "operaciones": mejor_resultado_global["operaciones"],
             "pnl_neto": round(mejor_resultado_global["pnl_neto"], 4),
-            "espaciado_pct": round(mejor_resultado_global["espaciado_pct"], 6)
+            "espaciado_pct": round(mejor_resultado_global["espaciado_pct"], 6),
+            "num_grids": mejor_resultado_global["num_grids"],
+            "analisis_original": analisis,
+            "params_optimos": mejor_resultado_global.get("params_optimos", {}),
+            "ai_overrides": ia_overrides or {}
         }
+        
     return {"symbol": symbol, "pnl_neto": -999.0}
 
-def backtest_grid_top(exchange: Any, top_symbols: List[str], capital: float, leverage: float, slippage_pct: float = 0.0005) -> List[Dict[str, Any]]:
+def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital: float, leverage: float, ia_overrides: Dict[str, Any] = None, slippage_pct: float = 0.0005) -> List[Dict[str, Any]]:
     resultados = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         futs = {
-            executor.submit(_backtest_grid_simbolo, exchange, sym, capital, leverage, slippage_pct): sym
-            for sym in top_symbols
+            executor.submit(_backtest_grid_simbolo, exchange, analisis, capital, leverage, slippage_pct, ia_overrides): analisis["symbol"]
+            for analisis in top_analisis
         }
         for fut in as_completed(futs):
             res = fut.result()
