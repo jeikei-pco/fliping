@@ -113,8 +113,8 @@ class GridEngine:
             fee_maker = float(market_info.get("maker", 0.00020))
             fee_taker = float(market_info.get("taker", 0.00050))
             
-            # Piso dinámico: Cubrir doble comisión (entrada + salida) + un margen neto de ganancia (ej. 0.15%)
-            self.min_spread_rentable = (fee_maker + fee_taker) + 0.0015
+            # Piso dinámico: Cubrir doble comisión (entrada + salida) + un margen neto de ganancia (0.05%)
+            self.min_spread_rentable = (fee_maker + fee_taker) + 0.0005
             max_spread = 0.0080  # Techo: 0.80%
             
             if hasattr(self, 'espaciado_optimo') and self.espaciado_optimo > 0:

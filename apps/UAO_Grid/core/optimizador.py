@@ -72,10 +72,10 @@ class OptimizadorGrid:
         # 3. Espaciado y Límites
         if grid_step_pct_override is not None:
             # La IA decidió un espaciado exacto en porcentaje (ej 0.22 -> 0.0022)
-            espaciado_pct = max(0.0015, min(float(grid_step_pct_override) / 100.0, 0.05))
+            espaciado_pct = max(0.0012, min(float(grid_step_pct_override) / 100.0, 0.05))
         else:
-            grid_step_optimo = analisis.get("grid_step_optimo", max(rango_vela_mediano * 0.8, 0.0015))
-            espaciado_pct = max(grid_step_optimo, 0.0015) # Mínimo 0.15% por comisiones
+            grid_step_optimo = analisis.get("grid_step_optimo", max(rango_vela_mediano * 0.8, 0.0012))
+            espaciado_pct = max(grid_step_optimo, 0.0012) # Mínimo 0.12% por comisiones
         
         if modo.upper() == "NEUTRAL":
             limite_sup = precio_actual * (1 + (deriva_max_pct / 2) * self.mult_riesgo)
@@ -95,6 +95,11 @@ class OptimizadorGrid:
         tamano_grid_fiat = precio_actual * espaciado_pct
         grids_matematicos = rango_total_fiat / (tamano_grid_fiat + 1e-9)
         num_grids_total = max(4, min(math.floor(grids_matematicos * grid_density_factor), 150))
+        
+        # 🎯 Ajuste crucial: Garantizar margen mínimo por línea (ej. 5 USDT)
+        min_margin = float(self.overrides.get("MIN_MARGIN_PER_LINE", 5.0))
+        max_grids_posibles = max(4, math.floor(capital_total / min_margin))
+        num_grids_total = min(num_grids_total, max_grids_posibles)
         
         capital_por_linea = capital_total / num_grids_total
         tamaño_orden_usdt = (capital_por_linea * apalancamiento) * capital_factor

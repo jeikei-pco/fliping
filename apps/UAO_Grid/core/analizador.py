@@ -223,8 +223,19 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         if rango < 0.0005:
             return None
 
-        # 4. Operatividad
-        df5["vela_util"] = df5.range_pct >= config.min_mov
+        # 4. Operatividad Dinámica
+        rango_vela_mediano = float(df5.range_pct.median())
+        
+        # El espaciado de la malla (grid_step) debe adaptarse a la vela típica del símbolo
+        # Pero nunca puede ser menor que (comisión_ida_y_vuelta + ganancia_minima_deseada)
+        min_step_posible = config.comision_rt + config.ganancia_min
+        grid_step_optimo = max(rango_vela_mediano * 0.8, min_step_posible)
+        
+        # Actualizamos la configuración para que el cálculo de operaciones use el paso dinámico
+        config.grid_step = grid_step_optimo
+
+        # Una vela es útil si su rango supera el tamaño de una celda del grid (grid_step)
+        df5["vela_util"] = df5.range_pct >= config.grid_step
         pct_util = float(df5.vela_util.mean())
 
         df5["ops_teoricas"] = np.floor(df5.range_pct / config.grid_step)
@@ -240,12 +251,10 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         deriva = (df5.high.max() - df5.low.min()) / df5.low.min()
 
         recorrido_real_mediano = float(df5.recorrido_real.median())
-        grid_step_optimo = recorrido_real_mediano / max(1.0, ops)
         
         high, low, close = df5['high'], df5['low'], df5['close']
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         atr_pct = float((tr.rolling(14).mean().iloc[-1]) / df5.close.iloc[-1])
-        rango_vela_mediano = float(((high - low) / df5["open"]).median())
 
         score, zigzag_score, amplitude_ratio = _calcular_score_zigzag(
             ops, pct_util, consistencia, sim, osc, deriva, rango_vela_mediano

@@ -324,6 +324,10 @@ class GridOrquestador:
                     logger.warning(f"⚠️ Webhook no disponible ({e}). No afecta el funcionamiento, continuando... (silenciando este error por 60s)")
                     last_error_log = now
             finally:
+                try:
+                    self.db.save_grid_status_cache(data)
+                except Exception as db_err:
+                    logger.debug(f"Error guardando cache local del webhook: {db_err}")
                 self.webhook_queue.task_done()
 
     def run(self):
