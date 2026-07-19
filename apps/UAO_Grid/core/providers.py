@@ -238,13 +238,23 @@ class ExchangeProvider(ExecutionProvider):
                 now = int(time.time())
                 for i, o in enumerate(chunk):
                     safe_grid_level = str(o.grid_level).replace("-", "m")
+                    try:
+                        px_str = self.exchange.price_to_precision(o.inst_id, o.price)
+                    except Exception:
+                        px_str = str(o.price)
+                        
+                    try:
+                        sz_str = self.exchange.amount_to_precision(o.inst_id, o.qty)
+                    except Exception:
+                        sz_str = str(o.qty)
+                        
                     item = {
                         "instId": o.inst_id,
                         "tdMode": "cross",
                         "side": "buy" if o.side == "BUY" else "sell",
                         "ordType": "limit",
-                        "px": str(o.price),
-                        "sz": str(o.qty),
+                        "px": px_str,
+                        "sz": sz_str,
                         "clOrdId": f"glvl{safe_grid_level}x{now}x{i}",
                     }
                     if o.reduce_only:
