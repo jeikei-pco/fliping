@@ -35,6 +35,8 @@ class GridMetrics:
     oscilacion: float
     deriva_pct: float
     score: float
+    zigzag_score: float       # 🎯 Nuevo: calidad del zig-zag (osc * simetria)
+    amplitude_ratio: float    # 🎯 Nuevo: tamaño de vela relativo al grid mínimo
     recorrido_real: float
     grid_step_optimo: float
     atr_pct: float
@@ -96,25 +98,95 @@ def _calcular_simetria(df5: pd.DataFrame) -> float:
 
 
 def _calcular_consistencia(df5: pd.DataFrame) -> float:
-    """Calcula la consistencia de la volatilidad a lo largo del tiempo."""
+    """Calcula la consistencia de la volatilidad a lo largo del tiempo (sin normalizar)."""
     media = df5.range_pct.mean()
     std = df5.range_pct.std()
     cv = std / (media + 1e-9)
     consistencia = 1 / (cv + 0.01)
-    
     return consistencia
 
 
 def _calcular_oscilacion(df5: pd.DataFrame) -> float:
-    """Mide la cantidad de ruido u oscilación interna en comparación con el rango de la vela."""
+    """Mide el zig-zag interno: recorrido_real / range_pct.
+    osc > 1 → el precio recorrió más distancia que el simple rango H-L (ida y vuelta real).
+    osc < 1 → movimiento mono-direccional dentro de la vela (sin rebote).
+    """
     osc = (df5.recorrido_real.mean() + 1e-9) / (df5.range_pct.mean() + 1e-9)
     return osc
 
 
-def _calcular_score(ops: float, pct_util: float, consistencia: float, sim: float, osc: float, deriva: float) -> float:
-    """Calcula la calificación final para operar en grid."""
-    score = (ops * 35 + pct_util * 20 + consistencia * 15 + sim * 10 + osc * 20) / (1 + deriva)
+def _calcular_consistencia_norm(df5: pd.DataFrame) -> float:
+    """
+    Consistencia normalizada al rango [0, 1].
+    cv alto (volatilidad esporádica) → consistencia baja.
+    cv bajo (volatilidad estable) → consistencia alta.
+    Usamos tanh para mapear suavemente sin explotar la escala.
+    """
+    media = df5.range_pct.mean()
+    std = df5.range_pct.std()
+    cv = std / (media + 1e-9)
+    # tanh(1/cv): cv=0.5→tanh(2)=0.96 | cv=1→tanh(1)=0.76 | cv=2→tanh(0.5)=0.46
+    return float(np.tanh(1.0 / (cv + 0.01)))
+
+
+def _calcular_score_zigzag(
+    ops: float,
+    pct_util: float,
+    consistencia: float,
+    sim: float,
+    osc: float,
+    deriva: float,
+    rango_vela_mediano: float,
+) -> tuple[float, float, float]:
+    """
+    Score rediseñado para detectar símbolos con:
+      1. Velas GRANDES (rango_vela_mediano alto)  ← amplitude_ratio
+      2. Zig-zag CONSTANTE (osc > 1 + simetria ≈ 1)  ← zigzag_score
+
+    Pesos:
+      zigzag_score  40% — zig-zag de calidad (osc * sim, normalizado)
+      amplitude     25% — velas grandes relativas al grid mínimo
+      ops           15% — operaciones reales por vela
+      pct_util      12% — % de velas con rango útil
+      consistencia   8% — volatilidad estable en el tiempo
+
+    NOTA sobre deriva:
+      La penalización por deriva (tendencia) fue ELIMINADA.
+      El engine tiene deslizamiento de malla (trailing) que maneja mercados
+      direccionales — castigar deriva descartaría candidatos ideales para
+      modo LONG/SHORT con trailing. El backtester elige el modo óptimo
+      (NEUTRAL/LONG/SHORT) y el score solo mide calidad de oscilación/amplitud.
+
+    Returns: (score, zigzag_score, amplitude_ratio)
+    """
+    # --- Zig-zag: osc mide cuánto oscila el precio DENTRO de la vela vs su rango H-L.
+    # osc > 1 → el precio recorre más camino que el simple rango = verdadero zig-zag.
+    # sim ≈ 1 → movimientos alcistas y bajistas equilibrados.
+    zigzag_score = float(np.tanh(osc * sim))  # → [0, 1], 1 = zig-zag perfecto
+
+    # --- Amplitud: qué tan grandes son las velas respecto al grid mínimo (0.2%).
+    # Un rango de 0.004 (0.4%) = 2x el mínimo → amplitude_ratio = 2.0 (cap en 5)
+    MIN_GRID = 0.002
+    amplitude_ratio = min(rango_vela_mediano / MIN_GRID, 5.0)
+
+    # --- Score compuesto (escala ≈ 0–100, SIN penalización por deriva)
+    # deriva alta + zigzag alto → candidato LONG/SHORT con deslizamiento → NO penalizar
+    score = (
+        zigzag_score  * 40 +   # 🎯 Zig-zag de calidad
+        amplitude_ratio * 5  +  # 🎯 Velas grandes (×5 porque ratio max=5 → max 25pts)
+        ops           * 15 +   # Operaciones reales
+        pct_util      * 12 +   # % velas útiles
+        consistencia  * 8      # Consistencia [0,1]
+    )
+
+    return round(score, 3), round(zigzag_score, 4), round(amplitude_ratio, 3)
+
+
+# Mantener alias de compatibilidad para otros módulos que importen _calcular_score
+def _calcular_score(ops, pct_util, consistencia, sim, osc, deriva, rango_vela_mediano=0.003):
+    score, _, _ = _calcular_score_zigzag(ops, pct_util, consistencia, sim, osc, deriva, rango_vela_mediano)
     return score
+
 
 
 def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None, timeframe: str = "5m", limit: int = 500) -> Optional[Dict[str, Any]]:
@@ -160,13 +232,12 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         ops = float(df5.ops_reales.mean())
         
         # 5. Cálculos avanzados
-        consistencia = _calcular_consistencia(df5)
+        consistencia = _calcular_consistencia_norm(df5)  # [0,1] normalizado
         sim = _calcular_simetria(df5)
         osc = _calcular_oscilacion(df5)
         
-        # 6. Deriva y Score
+        # 6. Deriva, Amplitud y Score zig-zag
         deriva = (df5.high.max() - df5.low.min()) / df5.low.min()
-        score = _calcular_score(ops, pct_util, consistencia, sim, osc, deriva)
 
         recorrido_real_mediano = float(df5.recorrido_real.median())
         grid_step_optimo = recorrido_real_mediano / max(1.0, ops)
@@ -175,6 +246,10 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         atr_pct = float((tr.rolling(14).mean().iloc[-1]) / df5.close.iloc[-1])
         rango_vela_mediano = float(((high - low) / df5["open"]).median())
+
+        score, zigzag_score, amplitude_ratio = _calcular_score_zigzag(
+            ops, pct_util, consistencia, sim, osc, deriva, rango_vela_mediano
+        )
 
         # 7. Formatear y retornar mediante DataClass
         precio_actual = precio_vivo if precio_vivo else float(df5.close.iloc[-1])
@@ -188,7 +263,9 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
             simetria=round(sim, 3),
             oscilacion=round(osc, 3),
             deriva_pct=round(deriva * 100, 2),
-            score=round(score, 3),
+            score=score,
+            zigzag_score=zigzag_score,
+            amplitude_ratio=amplitude_ratio,
             recorrido_real=round(recorrido_real_mediano, 6),
             grid_step_optimo=round(grid_step_optimo, 6),
             atr_pct=round(atr_pct, 6),

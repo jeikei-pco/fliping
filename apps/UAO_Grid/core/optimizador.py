@@ -17,7 +17,8 @@ class OptimizadorGrid:
             return {"symbol": symbol, "valido": False}
             
         # Extraer filtros de la IA o defaults
-        min_score = float(self.overrides.get("MIN_SCORE", 70))
+        min_score = float(self.overrides.get("MIN_SCORE", 30))   # ↓ el filtro real es el PnL del backtest
+
         min_cons = float(self.overrides.get("MIN_CONSISTENCY", 0.0))
         min_osc = float(self.overrides.get("MIN_OSCILLATION", 0.0))
         
@@ -27,14 +28,22 @@ class OptimizadorGrid:
         leverage_factor = max(0.80, min(float(self.overrides.get("LEVERAGE_FACTOR", 1.0)), 1.15))
         capital_factor = max(0.80, min(float(self.overrides.get("CAPITAL_FACTOR", 1.0)), 1.20))
         
-        # Filtros duros combinados con la IA
-        min_ops = float(self.overrides.get("MIN_OPS", 0.1))
+        # Filtros duros — verificar uno a uno para diagnóstico exacto
+        min_ops   = float(self.overrides.get("MIN_OPS", 0.1))
         min_velas = float(self.overrides.get("MIN_VELAS_UTILES", 20))
-        
-        if analisis.get("ops_promedio", 0) < min_ops or analisis.get("velas_utiles_pct", 0) < min_velas or \
-           analisis.get("score", 0) < min_score or analisis.get("consistencia", 0) < min_cons or \
-           analisis.get("oscilacion", 0) < min_osc:
-            return {"symbol": symbol, "valido": False, "razon": "No cumple criterios mínimos del analizador + IA"}
+        checks = [
+            ("ops_promedio",    analisis.get("ops_promedio",    0),   min_ops),
+            ("velas_utiles_pct", analisis.get("velas_utiles_pct", 0),  min_velas),
+            ("score",           analisis.get("score",           0),   min_score),
+            ("consistencia",    analisis.get("consistencia",    0),   min_cons),
+            ("oscilacion",      analisis.get("oscilacion",      0),   min_osc),
+        ]
+        for campo, valor, minimo in checks:
+            if valor < minimo:
+                return {
+                    "symbol": symbol, "valido": False,
+                    "razon": f"{campo}={valor:.3f} < min={minimo:.3f}"
+                }
 
         precio_actual = df["close"].iloc[-1] if df is not None and not df.empty else analisis.get("precio", 1.0)
         

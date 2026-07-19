@@ -39,7 +39,7 @@ class WatchdogREST(threading.Thread):
         
         self.intervalo = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", 120))
         self.timeout_ws = int(os.getenv("WATCHDOG_WS_TIMEOUT_SECONDS", 60))
-        self.drift_pct = float(os.getenv("WATCHDOG_PRICE_DRIFT_PCT", 1.5))
+        self.drift_pct = float(os.getenv("WATCHDOG_PRICE_DRIFT_PCT", 3))
         
         self.ultimos_precios_ws = {}
         self.ultimos_ticks_ts = {}
@@ -133,7 +133,7 @@ class GridOrquestador:
             
         self.engines = {} # Dict[str, GridEngine]
         self.engines_lock = threading.RLock()
-        self.max_active_symbols = int(os.getenv("GRID_SYMBOLS_TO_TRADE", "1"))
+        self.max_active_symbols = int(os.getenv("GRID_SYMBOLS_TO_TRADE", "3"))
         
         self.watchdog = WatchdogREST(self.provider, self.engines, self.exchange)
         self.ai_worker = None
@@ -153,9 +153,9 @@ class GridOrquestador:
             
         self.ciclo_segundos = int(os.getenv("SCAN_CYCLE_SECONDS", 1800))
         self.timeframe = os.getenv("SCAN_TIMEFRAME", "5m")
-        self.limit = int(os.getenv("SCAN_LIMIT", 200))
+        self.limit = int(os.getenv("SCAN_LIMIT", 1200))
         self.min_volume = float(os.getenv("SCAN_MIN_VOLUME_USDT", 1_000_000))
-        self.top_n = int(os.getenv("SCAN_TOP_N", 10))
+        self.top_n = int(os.getenv("SCAN_TOP_N", 30))
 
     def _min_qty_mercado(self, symbol: str) -> float:
         market = self.exchange.markets.get(symbol, {}) if getattr(self.exchange, "markets", None) else {}
@@ -210,7 +210,7 @@ class GridOrquestador:
             creds.get("api_key", ""),
             creds.get("api_secret", ""),
             creds.get("passphrase", ""),
-            getattr(self.provider, "is_demo", False),
+            getattr(self.provider, "is_demo", True),
             self._handle_real_fill,
         )
         self.ws_private.start()
@@ -855,6 +855,7 @@ class GridOrquestador:
             "candles_30": getattr(self, 'last_30_candles', [])
         }
         return data
+
     def _analizar_y_backtestear(self) -> list:
         """Retorna los symbols ganadores (hasta max_active_symbols)."""
         try:
@@ -887,15 +888,14 @@ class GridOrquestador:
             
             # Enviamos a backtest TODOS los que pasaron el filtro inicial del escáner
             top_analisis = df_res.to_dict(orient="records")
-            
             self.db.save_scanner_state(top_analisis, 1)
             
-            # 2. Obtener overrides de IA (Optimizador md)
+            # Obtener overrides de IA (Optimizador)
             ia_overrides = self.db.get_config_overrides()
             
-            logger.info(f"💹 Ejecutando Optimizador y Backtest direccional para {len(top_analisis)} símbolos filtrados...")
+            logger.info(f"💹 Ejecutando Optimizador y Backtest direccional para {len(top_analisis)} símbolos...")
             capital = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 50.0))
-            leverage_maximo = float(os.getenv("GRID_LEVERAGE", 15.0)) 
+            leverage_maximo = float(os.getenv("GRID_LEVERAGE", 15.0))
             
             bt_resultados = backtest_grid_top(self.exchange, top_analisis, capital, leverage_maximo, ia_overrides)
             
@@ -903,25 +903,47 @@ class GridOrquestador:
                 self.mejores_params = {}
                 
             if bt_resultados:
-                ganadores = bt_resultados[:self.max_active_symbols]
-                for ganador in ganadores:
-                    self.mejores_params[ganador['symbol']] = ganador
+                # FIX 1: Guardar mejores_params de TODOS los símbolos backtesteados,
+                # no solo los top-N activos. Esto permite rotación a cualquier símbolo
+                # con sus params optimizados disponibles.
+                for resultado in bt_resultados:
+                    self.mejores_params[resultado['symbol']] = resultado
+
+                # FIX 5: Loguear ranking completo con PnL para visibilidad total
+                logger.info("📈 [BACKTEST] Ranking completo por PnL estimado:")
+                for i, r in enumerate(bt_resultados):
+                    marker = "🏆" if i < self.max_active_symbols else "  "
                     logger.info(
-                        f"🏆 Ganador: {ganador['symbol']} | "
-                        f"Modo: {ganador['modo']} | "
-                        f"Apalancamiento: {ganador['apalancamiento']}x | "
-                        f"PnL Estimado: ${ganador['pnl_neto']}"
+                        "  %s #%02d %-25s | Modo: %-8s | Leverage: %2dx | PnL: $%8.4f | Ops: %4d | TF: %s",
+                        marker, i + 1, r['symbol'], r['modo'],
+                        r['apalancamiento'], r['pnl_neto'], r['operaciones'], r['timeframe']
                     )
+
+                # Solo los top-N activan engines nuevos
+                ganadores = bt_resultados[:self.max_active_symbols]
+                logger.info(
+                    "✅ [BACKTEST] Seleccionados %d/%d símbolo(s) para operar (max_active_symbols=%d)",
+                    len(ganadores), len(bt_resultados), self.max_active_symbols
+                )
                 
-                # Enviar los resultados reales del backtest a la API para la UI
+                # FIX 2: self.webhook_url no existe como atributo del objeto.
+                # Usar os.getenv directamente (igual que en _loop_operativo).
                 try:
-                    webhook_url_bt = self.webhook_url.replace("/webhook/grid", "/webhook/backtest")
+                    # FIX 2: WEBHOOK_URL viene del .env — usar .strip() por el espacio inicial
+                    _webhook_url = os.getenv("WEBHOOK_URL", "http://host.docker.internal:4000/api/webhook/grid").strip()
+                    webhook_url_bt = _webhook_url.replace("/webhook/grid", "/webhook/backtest")
                     requests.post(webhook_url_bt, json=bt_resultados[:10], timeout=3)
                 except Exception as e:
                     logger.debug(f"No se pudo enviar top 10 al webhook: {e}")
                     
                 return [g["symbol"] for g in ganadores]
+
+            # FIX 4: Fallback sin backtest — loguear advertencia y retornar por score del analizador
+            logger.warning(
+                "⚠️ [BACKTEST] Sin resultados válidos. Fallback: top-%d por score del analizador (sin params optimizados).",
+                self.max_active_symbols
+            )
             return [top_analisis[i]["symbol"] for i in range(min(self.max_active_symbols, len(top_analisis)))]
         except Exception as e:
-            logger.error(f"Error analizando mercados: {e}")
-            return ""
+            logger.error(f"Error analizando mercados: {e}", exc_info=True)
+            return []  # FIX 3: era return "" — iterar sobre str vacío es un bug silencioso

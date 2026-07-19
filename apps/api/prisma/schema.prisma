@@ -96,3 +96,10 @@ model EngineStatus {
   @@index([userId])
   @@map("engine_statuses")
 }
+
+model GridLiveStatus {
+  id          Int      @id @default(1)
+  payloadJson String   @db.Text
+  updatedAt   DateTime @updatedAt
+  @@map("grid_live_status")
+}

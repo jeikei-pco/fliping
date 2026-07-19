@@ -86,6 +86,7 @@ def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: flo
     # 20 horas = 1200 minutos. 5m = 240 velas, 15m = 80 velas.
     configuraciones = [("5m", 240), ("15m", 80)]
     mejor_resultado_global = None
+    rechazos = []  # recolectar razones de rechazo para el log final
 
     market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
     fee_maker = float(market.get("maker", 0.00020))
@@ -97,7 +98,8 @@ def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: flo
     for timeframe, limit in configuraciones:
         try:
             velas = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not velas or len(velas) < (limit // 2): 
+            if not velas or len(velas) < (limit // 2):
+                rechazos.append(f"{timeframe}:pocas_velas({len(velas) if velas else 0}<{limit//2})")
                 continue
                 
             df = pd.DataFrame(velas, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -108,6 +110,8 @@ def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: flo
                 params_optimos = optimizador.optimizar_symbol(symbol, df, capital, analisis, modo=modo)
                 
                 if not params_optimos.get("valido", False):
+                    razon = params_optimos.get("razon", "valido=False")
+                    rechazos.append(f"{timeframe}/{modo}:{razon}")
                     continue
 
                 # 2. Simulamos la ejecución con el apalancamiento seguro calculado
@@ -133,11 +137,18 @@ def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: flo
                     mejor_resultado_global = res
                     
         except Exception as e:
-            logger.debug(f"Error en {symbol} {timeframe}: {e}")
+            rechazos.append(f"{timeframe}:exception({e})")
+            logger.warning("⚠️ [BT] Error en %s %s: %s", symbol, timeframe, e)
             continue
 
     # Retornar el diccionario estructurado para el orquestador
     if mejor_resultado_global:
+        logger.info(
+            "✔ [BT] %-25s → PnL=$%.4f | Modo:%-8s | Lev:%2dx | Ops:%4d | TF:%s",
+            symbol, mejor_resultado_global["pnl_neto"], mejor_resultado_global["modo_optimo"],
+            mejor_resultado_global["apalancamiento_usado"], mejor_resultado_global["operaciones"],
+            mejor_resultado_global["timeframe_optimo"]
+        )
         return {
             "symbol": symbol,
             "timeframe": mejor_resultado_global["timeframe_optimo"],
@@ -152,6 +163,10 @@ def _backtest_grid_simbolo(exchange: Any, analisis: Dict[str, Any], capital: flo
             "ai_overrides": ia_overrides or {}
         }
         
+    logger.warning(
+        "✘ [BT] %-25s → RECHAZADO. Razones: %s",
+        symbol, " | ".join(rechazos) if rechazos else "sin_resultados"
+    )
     return {"symbol": symbol, "pnl_neto": -999.0}
 
 def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital: float, leverage: float, ia_overrides: Dict[str, Any] = None, slippage_pct: float = 0.0005) -> List[Dict[str, Any]]:

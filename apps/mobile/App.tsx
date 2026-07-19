@@ -242,6 +242,31 @@ export default function App() {
     }
   };
 
+  const [blacklist, setBlacklist] = useState<any[]>([]);
+  const [showBlacklist, setShowBlacklist] = useState(false);
+
+  const fetchBlacklist = async () => {
+    try {
+      const res = await callApi("/api/grid/blacklist");
+      if (res.success && res.data) {
+        setBlacklist(res.data);
+      }
+    } catch (e) {
+      console.log("Error fetching blacklist", e);
+    }
+  };
+
+  const removeBlacklist = async (symbol: string, mode: string) => {
+    try {
+      const res = await callApi(`/api/grid/blacklist/${symbol.replace("/", "_")}?mode=${mode}`, { method: "DELETE" });
+      if (res.success) {
+        await fetchBlacklist();
+      }
+    } catch (e) {
+      console.log("Error removing from blacklist", e);
+    }
+  };
+
   const saveGridConfig = async () => {
     try {
       await AsyncStorage.setItem("@grid_base_capital", gridBaseCapital);
@@ -951,6 +976,48 @@ export default function App() {
                   ) : (
                     <View style={{ backgroundColor: "#1E1E1E", padding: 16, borderRadius: 8 }}>
                       <Text style={{ color: colors.muted, textAlign: "center" }}>Esperando datos de la operación...</Text>
+                    </View>
+                  )}
+                </Panel>
+
+                {/* 🚫 BLACKLIST PANEL 🚫 */}
+                <Panel>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.sectionTitle}>Lista Negra (Blacklist)</Text>
+                    <Pressable onPress={() => {
+                      setShowBlacklist(!showBlacklist);
+                      if (!showBlacklist) fetchBlacklist();
+                    }}>
+                      <Text style={{ fontSize: 14, color: colors.primary, fontWeight: "bold" }}>
+                        {showBlacklist ? "Ocultar" : "Ver lista"}
+                      </Text>
+                    </Pressable>
+                  </View>
+
+                  {showBlacklist && (
+                    <View style={{ marginTop: 12 }}>
+                      {blacklist.length === 0 ? (
+                        <Text style={{ color: colors.muted }}>No hay símbolos en la lista negra.</Text>
+                      ) : (
+                        blacklist.map((item: any, idx: number) => (
+                          <View key={idx} style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: "#1E1E1E", padding: 12, borderRadius: 8, marginBottom: 8, borderWidth: 1, borderColor: colors.border }}>
+                            <View>
+                              <Text style={{ color: colors.text, fontWeight: "bold" }}>{item.symbol}</Text>
+                              <Text style={{ color: colors.muted, fontSize: 12 }}>Modo: {item.mode}</Text>
+                            </View>
+                            <Pressable 
+                              style={{ backgroundColor: colors.danger, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 4, justifyContent: "center" }}
+                              onPress={() => removeBlacklist(item.symbol, item.mode)}
+                            >
+                              <Text style={{ color: "#FFF", fontWeight: "bold", fontSize: 12 }}>Eliminar</Text>
+                            </Pressable>
+                          </View>
+                        ))
+                      )}
+                      
+                      <Pressable style={[styles.secondaryButtonCompact, { marginTop: 8 }]} onPress={fetchBlacklist}>
+                        <Text style={styles.secondaryButtonText}>Actualizar</Text>
+                      </Pressable>
                     </View>
                   )}
                 </Panel>

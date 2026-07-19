@@ -398,11 +398,60 @@ export const createHttpApp = (services: {
       
       const state = await job.getState();
       const result = job.returnvalue;
-      const failedReason = job.failedReason;
       
-      response.json({ id: job.id, state, result, failedReason });
+      response.json({ jobId: job.id, state, result });
     } catch (error: any) {
       response.status(500).json({ error: error.message });
+    }
+  });
+
+  // 🔥 NUEVO: Endpoint para listar y eliminar de la lista negra
+  app.get("/api/grid/blacklist", async (request, response) => {
+    try {
+      const { execFile } = await import("child_process");
+      const path = await import("path");
+      
+      const scriptPath = path.resolve(process.cwd(), "../UAO_Grid/scripts/blacklist_cli.py");
+      
+      execFile("python", [scriptPath, "list"], (error, stdout, stderr) => {
+        if (error) {
+          return response.status(500).json({ success: false, error: stderr || error.message });
+        }
+        try {
+          const res = JSON.parse(stdout);
+          response.json(res);
+        } catch (e: any) {
+          response.status(500).json({ success: false, error: "Error parseando respuesta de Python" });
+        }
+      });
+    } catch (error: any) {
+      response.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete("/api/grid/blacklist/:symbol", async (request, response) => {
+    try {
+      const symbol = request.params.symbol.replace("_", "/"); // Ej: BTC_USDT -> BTC/USDT
+      const mode = (request.query.mode as string) || "real"; // o "demo"
+      
+      const { execFile } = await import("child_process");
+      const path = await import("path");
+      
+      const scriptPath = path.resolve(process.cwd(), "../UAO_Grid/scripts/blacklist_cli.py");
+      
+      execFile("python", [scriptPath, "remove", symbol, mode], (error, stdout, stderr) => {
+        if (error) {
+          return response.status(500).json({ success: false, error: stderr || error.message });
+        }
+        try {
+          const res = JSON.parse(stdout);
+          response.json(res);
+        } catch (e: any) {
+          response.status(500).json({ success: false, error: "Error parseando respuesta de Python" });
+        }
+      });
+    } catch (error: any) {
+      response.status(500).json({ success: false, error: error.message });
     }
   });
 
@@ -450,8 +499,23 @@ export const createHttpApp = (services: {
   app.post("/api/webhook/grid", async (request, response) => {
     try {
       const data = request.body;
-      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
-      await gridRedisConnection.set("grid:webhook_status", JSON.stringify(data));
+      const payloadJson = JSON.stringify(data);
+
+      // 1. Redis: acceso en vivo para la app abierta
+      try {
+        const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+        await gridRedisConnection.set("grid:webhook_status", payloadJson);
+      } catch (_redisErr) {
+        // Redis no crítico — continuamos con Postgres
+      }
+
+      // 2. Postgres: persistencia duradera para cuando la app esté cerrada
+      await services.prisma.gridLiveStatus.upsert({
+        where:  { id: 1 },
+        update: { payloadJson },
+        create: { id: 1, payloadJson },
+      });
+
       response.json({ success: true });
     } catch (error: any) {
       response.status(500).json({ success: false, error: error.message });
@@ -476,13 +540,29 @@ export const createHttpApp = (services: {
 
   app.get("/api/grid/status", async (_request, response) => {
     try {
-      const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
-      const data = await gridRedisConnection.get("grid:webhook_status");
-      if (!data) {
+      // 1. Intentar Redis primero (dato más fresco, en vivo)
+      let data: string | null = null;
+      try {
+        const { gridRedisConnection } = await import("../infrastructure/workers/grid-queue.js");
+        data = await gridRedisConnection.get("grid:webhook_status");
+      } catch (_redisErr) {
+        // Redis caído — usar fallback Postgres
+      }
+
+      if (data) {
+        response.json(JSON.parse(data));
+        return;
+      }
+
+      // 2. Fallback: Postgres (último estado persistido aunque la app estuviera cerrada)
+      const cached = await services.prisma.gridLiveStatus.findUnique({ where: { id: 1 } });
+      if (!cached) {
         response.json(null);
         return;
       }
-      response.json(JSON.parse(data));
+      const parsed = JSON.parse(cached.payloadJson);
+      // Añadir flag para que el frontend sepa que es dato persistido (no en vivo)
+      response.json({ ...parsed, _source: "postgres_cache", _cachedAt: cached.updatedAt });
     } catch (error: any) {
       response.status(500).json({ success: false, error: error.message });
     }

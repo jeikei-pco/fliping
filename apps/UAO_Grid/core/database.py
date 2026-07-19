@@ -142,11 +142,164 @@ class Database:
                         ai_factors TEXT NOT NULL,
                         pnl REAL DEFAULT 0.0,
                         win_rate REAL DEFAULT 0.0,
+"""
+database.py — Gestión de la Base de Datos Local en SQLite.
+Patrón RAM-first + Flush periódico para evitar sobreescribir disco.
+"""
+import sqlite3
+import json
+import logging
+import os
+import threading
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+
+logger = logging.getLogger("UAO_Sclaping.database")
+
+class Database:
+    def __init__(self, db_path: str = "./data/uao_grid.db"):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        
+        # Crear directorio si no existe
+        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+        self._init_db()
+
+    def _get_connection(self):
+        """Retorna una nueva conexión SQLite. IMPORTANTE: No compartir entre hilos."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        """Inicializa las tablas de la base de datos."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Tabla Balance
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS balance (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        usdt_total REAL NOT NULL,
+                        usdt_available REAL NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Posiciones
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS positions (
+                        symbol TEXT PRIMARY KEY,
+                        side TEXT NOT NULL,
+                        qty REAL NOT NULL,
+                        entry_price REAL NOT NULL,
+                        opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Órdenes
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS orders (
+                        order_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        qty REAL NOT NULL,
+                        status TEXT NOT NULL,
+                        reduce_only BOOLEAN NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        grid_level INTEGER NOT NULL DEFAULT 0
+                    )
+                ''')
+                
+                # Migración para DB existente
+                try:
+                    cursor.execute('ALTER TABLE orders ADD COLUMN grid_level INTEGER NOT NULL DEFAULT 0')
+                except sqlite3.OperationalError:
+                    pass  # Columna ya existe
+
+                # Tabla Trades (Historial)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS trades (
+                        trade_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        qty REAL NOT NULL,
+                        pnl REAL NOT NULL DEFAULT 0.0,
+                        fee REAL NOT NULL DEFAULT 0.0,
+                        executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Estado del Grid (para recuperar la malla)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS grid_state (
+                        symbol TEXT PRIMARY KEY,
+                        levels_json TEXT NOT NULL,
+                        atr_value REAL NOT NULL,
+                        center_price REAL NOT NULL,
+                        modo_drenaje BOOLEAN NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Estado del Scanner
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS scanner_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        ranking_json TEXT NOT NULL,
+                        cycle_count INTEGER NOT NULL DEFAULT 0,
+                        last_cycle_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Config Overrides (AI Optimizer)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS config_overrides (
+                        param_key TEXT PRIMARY KEY,
+                        param_value TEXT NOT NULL,
+                        updated_by TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Tabla Blacklist (Símbolos Restringidos OKX)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS blacklist (
+                        symbol TEXT,
+                        mode TEXT,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (symbol, mode)
+                    )
+                ''')
+
+                # Tabla de Historial ML para configuraciones
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ml_history (
+                        session_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        analyzer_metrics TEXT NOT NULL,
+                        math_params TEXT NOT NULL,
+                        ai_factors TEXT NOT NULL,
+                        pnl REAL DEFAULT 0.0,
+                        win_rate REAL DEFAULT 0.0,
                         profit_factor REAL DEFAULT 0.0,
                         total_trades INTEGER DEFAULT 0,
                         wins INTEGER DEFAULT 0,
                         gross_profit REAL DEFAULT 0.0,
                         gross_loss REAL DEFAULT 0.0
+                    )
+                ''')
+
+                # Tabla Cache de Webhook del Grid (fallback offline)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS grid_status_cache (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        payload_json TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
 
@@ -408,3 +561,40 @@ class Database:
             cursor.execute("SELECT 1 FROM blacklist WHERE symbol=? AND mode=?", (symbol, modo.lower()))
             return cursor.fetchone() is not None
 
+    def get_lista_negra(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT symbol, mode, added_at FROM blacklist ORDER BY added_at DESC")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def remover_de_lista_negra(self, symbol: str, modo: str):
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM blacklist WHERE symbol=? AND mode=?", (symbol, modo.lower()))
+                conn.commit()
+                logger.info(f"✅ Símbolo {symbol} removido de la lista negra (modo {modo})")
+
+    # ── GRID WEBHOOK CACHE (fallback offline) ──
+
+    def save_grid_status_cache(self, payload: dict) -> None:
+        """Persiste el último payload del webhook en SQLite como fallback offline."""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute('''
+                    INSERT INTO grid_status_cache (id, payload_json, updated_at)
+                    VALUES (1, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        updated_at   = excluded.updated_at
+                ''', (json.dumps(payload), datetime.utcnow().isoformat()))
+                conn.commit()
+
+    def get_grid_status_cache(self) -> dict | None:
+        """Retorna el último payload guardado localmente (fallback si la API está caída)."""
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute('SELECT payload_json FROM grid_status_cache WHERE id = 1').fetchone()
+                if row:
+                    return json.loads(row['payload_json'])
+        return None

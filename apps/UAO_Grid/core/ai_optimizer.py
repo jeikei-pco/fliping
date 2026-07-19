@@ -39,11 +39,11 @@ class AIOptimizerWorker(threading.Thread):
     def _get_api_providers(self):
         providers = []
         
-        # Gemini (OpenAI compat)
+        # Gemini (Native SDK)
         for key_name in ["GEMINI_API_KEY", "GEMINI_API_KEY2", "GEMINI_API_KEY3"]:
             val = os.getenv(key_name)
             if val:
-                providers.append({"url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "key": val, "model": "gemini-2.0-flash", "type": "openai"})
+                providers.append({"key": val, "model": "gemini-2.0-flash", "type": "gemini"})
                 
         # OpenRouter
         for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY2"]:
@@ -202,24 +202,59 @@ Ejemplo:
         success = False
         
         for provider in providers:
-            logger.info(f"Probando proveedor AI: {provider['url']} (Modelo: {provider['model']})")
+            logger.info(f"Probando proveedor AI: {provider.get('url', 'Gemini Native')} (Modelo: {provider['model']})")
             
-            if provider["type"] == "openai":
-                body = {
-                    "model": provider["model"],
-                    "messages": [
-                        {"role": "system", "content": "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_tokens": 1000,
-                    "response_format": {"type": "json_object"}
-                }
-                # Groq doesn't always support response_format in all models, but we can try. If it fails, we fall back.
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {provider['key']}"
-                }
+            if provider["type"] == "gemini":
+                try:
+                    from google import genai
+                    from google.genai import types
+                    
+                    client = genai.Client(api_key=provider["key"])
+                    response = client.models.generate_content(
+                        model=provider['model'],
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction="Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas.",
+                            temperature=0.2
+                        )
+                    )
+                    content = response.text
+                    success = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Fallo proveedor Gemini: {e}")
+                    continue
+
+            elif provider["type"] == "openai":
+                try:
+                    import openai
+                    
+                    base_url = provider["url"].replace("/chat/completions", "") if "url" in provider else None
+                    client = openai.OpenAI(api_key=provider["key"], base_url=base_url)
+                    
+                    kwargs = {
+                        "model": provider["model"],
+                        "messages": [
+                            {"role": "system", "content": "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": 1000
+                    }
+                    
+                    # Usar response_format solo si no es Groq
+                    if "groq" not in provider.get("url", ""):
+                        kwargs["response_format"] = {"type": "json_object"}
+                        
+                    response = client.chat.completions.create(**kwargs)
+                    content = response.choices[0].message.content
+                    success = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Fallo proveedor {provider.get('url')}: {e}")
+                    continue
+                    
             else:
+                # Fallback para Anthropic/Claude Code Proxy manual
                 body = {
                     "model": provider["model"],
                     "max_tokens": 1000,
@@ -232,27 +267,16 @@ Ejemplo:
                     "anthropic-version": "2023-06-01"
                 }
             
-            # Quitar response_format para Groq o Gemini si causan problemas (Gemini y OpenRouter los toleran en su API openai)
-            if "groq" in provider["url"]:
-                body.pop("response_format", None)
+                request = urllib.request.Request(
+                    provider["url"],
+                    data=json.dumps(body).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
                 
-            request = urllib.request.Request(
-                provider["url"],
-                data=json.dumps(body).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            
-            try:
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    raw = response.read().decode("utf-8", "replace")
-                    
-                    if provider["type"] == "openai":
-                        payload = json.loads(raw)
-                        content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        success = True
-                        break
-                    else:
+                try:
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        raw = response.read().decode("utf-8", "replace")
                         # Parseo Anthropic (SSE o JSON standard)
                         try:
                             payload = json.loads(raw)
@@ -278,9 +302,9 @@ Ejemplo:
                                         pass
                             success = True
                             break
-            except Exception as e:
-                logger.warning(f"Fallo proveedor {provider['url']}: {e}")
-                continue
+                except Exception as e:
+                    logger.warning(f"Fallo proveedor {provider['url']}: {e}")
+                    continue
                 
         if not success:
             logger.warning("⚠️ Todos los proveedores de IA fallaron. Usando OptimizadorGrid (Matemático) como respaldo.")
