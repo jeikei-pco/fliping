@@ -518,6 +518,7 @@ class GridOrquestador:
         if hasattr(self, 'mejores_params') and symbol in self.mejores_params:
             leverage_optimo = self.mejores_params[symbol].get("apalancamiento", engine.leverage)
             engine.leverage = leverage_optimo # Actualizar el engine
+            engine.num_grids_optimo = self.mejores_params[symbol].get("num_grids", 6)
             
             # Iniciar sesión de aprendizaje para ML
             session_id = f"{symbol}_{int(time.time())}"
@@ -681,13 +682,13 @@ class GridOrquestador:
                                     engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
                                 except Exception as e:
                                     logger.error(f"Error recargando ATR tras breakout en {symbol}: {e}")
-                                engine.inicializar_grid(precio_actual)
+                                engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
                             # else: 
                             # Si es solo un llenado intermedio, NO recalculamos. Mantenemos el TP estático.
                         else:
                             # Sin inventario, podemos centrar la malla libremente
                             logger.info(f"🎯 [GRID] Posición plana en {symbol}, centrando malla nueva.")
-                            engine.inicializar_grid(precio_actual)
+                            engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
                     
                     if engine.malla_modificada:
                         with self._engine_lock:
