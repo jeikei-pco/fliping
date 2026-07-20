@@ -231,7 +231,8 @@ class GridOrquestador:
                 if not engine:
                     logger.debug(f"Fill WS ignorado para {symbol}, no hay engine activo.")
                     return
-                engine.procesar_ejecucion_simulada(side, price, qty, grid_level)
+                market_info = self.exchange.markets.get(symbol, {})
+                engine.procesar_ejecucion_simulada(side, price, qty, grid_level, market_info)
                 
                 # --- NUEVO: FORZAR RECONCILIACIÓN INMEDIATA ---
                 logger.info(f"⚡ [WS] Triggering instant reconciliation for {symbol} TP/Grid adjustment.")
@@ -272,7 +273,7 @@ class GridOrquestador:
                 })
                 self.last_fills_history = self.last_fills_history[-50:]
                 self.force_balance_sync.set()
-            logger.info("🎯 [WS] FILL detectado %s %s qty=%s price=%s level=%s", symbol, side, qty, price, grid_level)
+            logger.info("🎯 [WS] SEÑAL EJECUTADA: %s %s qty=%s price=%s level=%s", symbol, side, qty, price, grid_level)
             # NOTA: No llamamos wakeup_event.set() aquí porque eso forzaría un escaneo completo 
             # de todo el mercado (analizar_y_backtestear) en cada grid fill. La reconciliación de órdenes 
             # ocurre naturalmente en el siguiente tick del WS público (en _loop_operativo).
@@ -395,7 +396,7 @@ class GridOrquestador:
         if not nuevos_tops:
             return
 
-        # 3. FILTRO DE ACTIVOS CORE (Hold Mode)
+        # 3. FILTRO DE ACTIVOS CORE (Hold Mode) Y RECUPERACIÓN DE POSICIONES
         posiciones_crudas = self.provider.get_open_positions()
         posiciones_operables = self._filtrar_posiciones_operables(posiciones_crudas)
         core_assets = ["BTC/", "ETH/", "SOL/", "OKB/", "OKT/"] 
@@ -406,6 +407,12 @@ class GridOrquestador:
                 if p.symbol not in active_symbols:
                     logger.info(f"🛡️ Activo Core en Hold detectado ({p.symbol}). Manteniendo posición abierta, cancelando órdenes (Evadiendo Drenaje).")
                     self.provider.cancel_all_orders(p.symbol)
+            elif not is_core:
+                # Recuperar motores para operaciones que ya existen en el exchange y no están en memoria
+                if p.symbol not in active_symbols:
+                    logger.info(f"🔄 Recuperando motor para posición existente: {p.symbol}")
+                    self._iniciar_operacion(p.symbol)
+                    active_symbols.append(p.symbol)
 
         # 4. GESTIÓN DE ENGINES EXISTENTES
         for symbol in active_symbols:
@@ -474,17 +481,27 @@ class GridOrquestador:
                         engine.activar_modo_drenaje()
 
         # 5. INICIAR NUEVOS MOTORES
+        simbolos_con_posiciones = len(set(
+            p.symbol for p in posiciones_operables 
+            if not any(p.symbol.startswith(coin) for coin in core_assets)
+        ))
+
         for symbol in nuevos_tops:
             with self.engines_lock:
                 # Contamos cuántos NO están en drenaje (slots ocupados productivos)
                 slots_productivos = sum(1 for e in self.engines.values() if not e.modo_drenaje)
                 
             if symbol not in self.engines:
+                if simbolos_con_posiciones >= self.max_active_symbols:
+                    logger.info(f"⚠️ Máximo de símbolos con posiciones alcanzado ({simbolos_con_posiciones}/{self.max_active_symbols}). No se abre {symbol}.")
+                    continue
+                    
                 if slots_productivos < self.max_active_symbols:
                     if usdt_disponible >= capital * 0.95:  # 95% margen de error por comisiones/rounding
                         logger.info(f"✨ Iniciando nuevo motor para TOP: {symbol} (Slots {slots_productivos+1}/{self.max_active_symbols})")
                         self._iniciar_operacion(symbol)
                         usdt_disponible -= capital # Reservamos capital lógicamente
+                        simbolos_con_posiciones += 1 # Aumentar preventivamente el contador para el siguiente ciclo
                     else:
                         logger.warning(f"⚠️ Sin balance para iniciar {symbol}. Disponible: {usdt_disponible:.2f} < Requerido: {capital:.2f}")
                 else:

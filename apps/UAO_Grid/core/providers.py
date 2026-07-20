@@ -208,9 +208,31 @@ class ExchangeProvider(ExecutionProvider):
             return []
 
     def reconciliar_ordenes(self, deseadas: List[Order], actuales: List[Order]):
-        a_cancelar = [act for act in actuales if not any(des == act for des in deseadas)]
-        a_crear = [des for des in deseadas if not any(act == des for act in actuales)]
-        if not a_cancelar and not a_crear:
+        a_cancelar = []
+        a_crear = []
+        a_modificar = []
+
+        deseadas_pendientes = list(deseadas)
+        actuales_pendientes = list(actuales)
+
+        for act in actuales:
+            match = next((d for d in deseadas_pendientes if d.grid_level == act.grid_level and d.side == act.side and act.grid_level != 0 and d.reduce_only == act.reduce_only), None)
+            if match:
+                deseadas_pendientes.remove(match)
+                actuales_pendientes.remove(act)
+                if act != match:
+                    a_modificar.append((act, match))
+
+        for act in actuales_pendientes:
+            perfect_match = next((d for d in deseadas_pendientes if d == act), None)
+            if perfect_match:
+                deseadas_pendientes.remove(perfect_match)
+            else:
+                a_cancelar.append(act)
+
+        a_crear.extend(deseadas_pendientes)
+
+        if not a_cancelar and not a_crear and not a_modificar:
             return
 
         try:
@@ -231,6 +253,34 @@ class ExchangeProvider(ExecutionProvider):
                     logger.info("Cancelando %d ordenes batch", len(payload))
                     self.exchange.private_post_trade_cancel_batch_orders(payload)
                     # ✅ FIX: Anti-Baneo Rate Limit
+                    time.sleep(0.5)
+                    
+            for chunk in _chunked(a_modificar, 20):
+                payload = []
+                for act, des in chunk:
+                    try:
+                        new_px_str = self.exchange.price_to_precision(des.inst_id, des.price)
+                    except Exception:
+                        new_px_str = str(des.price)
+                    try:
+                        new_sz_str = self.exchange.amount_to_precision(des.inst_id, des.qty)
+                    except Exception:
+                        new_sz_str = str(des.qty)
+                        
+                    item = {
+                        "instId": act.inst_id,
+                        "newPx": new_px_str,
+                        "newSz": new_sz_str,
+                    }
+                    if str(act.order_id).startswith("glvl"):
+                        item["clOrdId"] = str(act.order_id)
+                    else:
+                        item["ordId"] = str(act.order_id)
+                    payload.append(item)
+                    
+                if payload:
+                    logger.info("Modificando %d ordenes batch", len(payload))
+                    self.exchange.private_post_trade_amend_batch_orders(payload)
                     time.sleep(0.5)
 
             for chunk in _chunked(a_crear, 20):

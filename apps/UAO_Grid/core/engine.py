@@ -452,9 +452,10 @@ class GridEngine:
                 
         return deseadas
 
-    def procesar_ejecucion_simulada(self, side: str, price: float, qty: float, level_id: int = None):
+    def procesar_ejecucion_simulada(self, side: str, price: float, qty: float, level_id: int = None, market_info: dict = None):
         """Simula el PnL y posición, y RECALCULA LA MALLA DINÁMICAMENTE."""
         self.ultima_ejecucion_ts = time.time()
+        market_info = market_info or {}
         old_pos = self.posicion_neta
         if side == "BUY":
             self.posicion_neta += qty
@@ -485,7 +486,15 @@ class GridEngine:
             
             # GENERAR EL TAKE PROFIT DINÁMICO EN CONTRA
             tp_side = "SELL" if side == "BUY" else "BUY"
-            mult = (1 + self.espaciado_actual) if side == "BUY" else (1 - self.espaciado_actual)
+            
+            # Obtener comisiones (usar defaults realistas si no existen en market_info)
+            fee_maker = float(market_info.get("maker", 0.00020))
+            fee_taker = float(market_info.get("taker", 0.00050))
+            
+            # Rentabilidad deseada = comisiones + 0.10% (0.0010)
+            profit_target = fee_maker + fee_taker + 0.0010
+            
+            mult = (1 + profit_target) if side == "BUY" else (1 - profit_target)
             tp_price = price * mult
             
             # En lugar de multiplicar ciegamente por 100:
@@ -503,7 +512,10 @@ class GridEngine:
                 "precio_original_entrada": price
             })
             self.malla_modificada = True
-            logger.info(f"   🔄 [MALLA] Nivel {n_ejecutado['level']} llenado. TP {tp_side} creado a ${tp_price:.4f}")
+            
+            logger.info(f"   🔄 [MALLA] SEÑAL EJECUTADA: Orden Nivel {n_ejecutado['level']} llenada (Side={side}, Price={price:.4f}, Qty={qty}).")
+            logger.info(f"   🔄 [MALLA] CONTRA-ORDEN CREADA: Se creó un TP {tp_side} a precio ${tp_price:.4f} con qty exacta {n_ejecutado['qty']}. "
+                        f"(Cálculo: Maker {fee_maker*100:.3f}% + Taker {fee_taker*100:.3f}% + 0.10% Ganancia = Objetivo {profit_target*100:.3f}%)")
         else:
             logger.warning(f"   ⚠️ [MALLA] No se encontró el nivel para el fill (side={side}, price={price}, id={level_id})")
 
