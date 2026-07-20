@@ -674,6 +674,34 @@ class GridOrquestador:
                     
                     # === NUEVO: RESPIRACIÓN EN VIVO (CONDICIONADA) ===
                     now_sec = int(time.time())
+                    
+                    # === NUEVO: LIMPIEZA DE ÓRDENES ESTANCADAS CADA 15 MIN ===
+                    if not hasattr(engine, 'last_stagnation_check'):
+                        engine.last_stagnation_check = now_sec
+                    
+                    if now_sec - engine.last_stagnation_check >= 900:  # 15 minutos
+                        engine.last_stagnation_check = now_sec
+                        # Si no ha habido trades en los últimos 15 mins
+                        if now_sec - last_trade_time >= 900:
+                            try:
+                                actuales = self.provider.get_open_orders(symbol)
+                                time_15m_ago_ms = (now_sec - 900) * 1000
+                                # Verificar si existen órdenes creadas hace 15 min o más
+                                ordenes_viejas = [o for o in actuales if o.get('timestamp') and o['timestamp'] <= time_15m_ago_ms]
+                                
+                                if ordenes_viejas:
+                                    logger.warning(f"🧹 [ESTANCAMIENTO] {symbol} lleva 15 min sin ejecutar y con órdenes viejas. Cancelando y cerrando grid.")
+                                    try:
+                                        self.exchange.cancel_all_orders(symbol)
+                                    except Exception as e:
+                                        logger.error(f"Error cancelando órdenes de {symbol}: {e}")
+                                    engine.reset()
+                                    engine.kill_switch_activado = True
+                                    self.wakeup_event.set()
+                                    break
+                            except Exception as e:
+                                logger.error(f"Error verificando estancamiento en {symbol}: {e}")
+                    
                     # Respirar si pasaron 3 velas sin operaciones (modificado: ya no forzamos por posición cerrada)
                     condicion_respiracion = (now_sec - last_trade_time >= tres_velas_sec)
                     
@@ -691,21 +719,15 @@ class GridOrquestador:
                     # =================================================
                     
                     if engine.malla_necesita_reajuste(precio_actual) and not engine.modo_drenaje:
-                        if abs(engine.posicion_neta) > 1e-9:
-                            if engine.chequear_breakout_malla(precio_actual):
-                                logger.warning(f"🚨 [BREAKOUT] Precio fuera de límites en {symbol}. Recalculando Malla.")
-                                try:
-                                    df_5m = self._fetch_velas(symbol)
-                                    engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
-                                except Exception as e:
-                                    logger.error(f"Error recargando ATR tras breakout en {symbol}: {e}")
-                                engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
-                            # else: 
-                            # Si es solo un llenado intermedio, NO recalculamos. Mantenemos el TP estático.
-                        else:
-                            # Sin inventario, podemos centrar la malla libremente
-                            logger.info(f"🎯 [GRID] Posición plana en {symbol}, centrando malla nueva.")
-                            engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
+                        # Re-centramos la malla permitiendo que se desplace (slide) con el precio
+                        # y que respire (ajuste de espaciado_actual por ATR) incluso si hay inventario.
+                        logger.info(f"🎯 [GRID] Desplazamiento/Respiración activado en {symbol}. Re-centrando malla en {precio_actual:.4f}.")
+                        try:
+                            df_5m = self._fetch_velas(symbol)
+                            engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
+                        except Exception as e:
+                            logger.error(f"Error recargando ATR en {symbol}: {e}")
+                        engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
                     
                     if engine.malla_modificada:
                         with self._engine_lock:

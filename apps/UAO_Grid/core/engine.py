@@ -193,7 +193,9 @@ class GridEngine:
                 logger.warning(f"⏳ Pausa de Seguridad: Cambiando modo de {modo_anterior} a {self.modo_estrategia}. Esperando 3s para sincronización con el exchange...")
                 time.sleep(3.0)
                 
-        modo_uso = getattr(self, "modo_estrategia", "NEUTRAL")
+        # Forzar NEUTRAL siempre, sin importar lo que dictamine la IA, para garantizar bidireccionalidad
+        self.modo_estrategia = "NEUTRAL"
+        modo_uso = "NEUTRAL"
         
         self.centro_grid = precio_base
         self.num_lineas_lado = max(1, num_grids_sugerido // 2)
@@ -492,9 +494,12 @@ class GridEngine:
             fee_taker = float(market_info.get("taker", 0.00050))
             
             # Rentabilidad deseada = comisiones + 0.10% (0.0010)
-            profit_target = fee_maker + fee_taker + 0.0010
+            self.min_spread_rentable = fee_maker + fee_taker + 0.0010
             
-            mult = (1 + profit_target) if side == "BUY" else (1 - profit_target)
+            # Crear contra-orden respetando el espaciado dinámico (ATR), 
+            # asegurando siempre el mínimo rentable
+            espaciado_usar = max(self.espaciado_actual, self.min_spread_rentable)
+            mult = (1 + espaciado_usar) if side == "BUY" else (1 - espaciado_usar)
             tp_price = price * mult
             
             # En lugar de multiplicar ciegamente por 100:
@@ -513,9 +518,8 @@ class GridEngine:
             })
             self.malla_modificada = True
             
-            logger.info(f"   🔄 [MALLA] SEÑAL EJECUTADA: Orden Nivel {n_ejecutado['level']} llenada (Side={side}, Price={price:.4f}, Qty={qty}).")
-            logger.info(f"   🔄 [MALLA] CONTRA-ORDEN CREADA: Se creó un TP {tp_side} a precio ${tp_price:.4f} con qty exacta {n_ejecutado['qty']}. "
-                        f"(Cálculo: Maker {fee_maker*100:.3f}% + Taker {fee_taker*100:.3f}% + 0.10% Ganancia = Objetivo {profit_target*100:.3f}%)")
+            logger.info(f"     🔄 [MALLA] SEÑAL EJECUTADA: Nivel {n_ejecutado['level']} llenado. Price={price:.4f}.")
+            logger.info(f"     🔄 [MALLA] CONTRA-ORDEN CREADA: TP {tp_side} a ${tp_price:.4f} (Espaciado usado: {espaciado_usar*100:.3f}%).")
         else:
             logger.warning(f"   ⚠️ [MALLA] No se encontró el nivel para el fill (side={side}, price={price}, id={level_id})")
 
