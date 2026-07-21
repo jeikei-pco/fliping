@@ -22,6 +22,7 @@ def _normalizar_analisis(analisis: Dict[str, Any]) -> Dict[str, Any]:
     grid = profile.get("grid", {})
     risk = profile.get("risk", {})
     capital = profile.get("capital", {})
+    execution = profile.get("execution", {})
     metadata = profile.get("metadata", {})
 
     normalized = dict(analisis)
@@ -46,6 +47,9 @@ def _normalizar_analisis(analisis: Dict[str, Any]) -> Dict[str, Any]:
         "capital_factor": capital.get("capital_factor", analisis.get("capital_factor", 1.0)),
         "apalancamiento_factor": capital.get("apalancamiento_factor", analisis.get("apalancamiento_factor", 1.0)),
         "modo_preferido": trend.get("modo_preferido", analisis.get("modo_preferido", "NEUTRAL")),
+        "fee_round_trip_pct": execution.get("comision_rt", analisis.get("fee_round_trip_pct", 0.0012)),
+        "min_profit_pct": execution.get("ganancia_min", analisis.get("min_profit_pct", 0.0005)),
+        "min_grid_step": execution.get("min_grid_step", analisis.get("min_grid_step")),
     })
     return normalized
 
@@ -117,6 +121,9 @@ class OptimizadorGrid:
         atr_pct = analisis.get("atr_pct", 0.003)
         deriva_max_pct = analisis.get("deriva_pct", 1.5) / 100.0  # analizador lo devuelve en pct (ej. 1.5 para 1.5%)
         rango_vela_mediano = analisis.get("rango_vela_mediano", 0.001)
+        fee_round_trip_pct = float(analisis.get("fee_round_trip_pct", 0.0012) or 0.0012)
+        min_profit_pct = float(analisis.get("min_profit_pct", 0.0005) or 0.0005)
+        min_grid_step = float(analisis.get("min_grid_step", fee_round_trip_pct + min_profit_pct) or (fee_round_trip_pct + min_profit_pct))
 
         # 2. Apalancamiento dinamico desde el perfil del simbolo.
         limite_apalancamiento = int(self.overrides.get("MAX_LEVERAGE", self.max_leverage))
@@ -127,10 +134,10 @@ class OptimizadorGrid:
         # 3. Espaciado y Límites
         if grid_step_pct_override is not None:
             # La IA decidió un espaciado exacto en porcentaje (ej 0.22 -> 0.0022)
-            espaciado_pct = max(0.0012, min(float(grid_step_pct_override) / 100.0, 0.05))
+            espaciado_pct = max(min_grid_step, min(float(grid_step_pct_override) / 100.0, 0.05))
         else:
             grid_step_optimo = analisis.get("grid_step_optimo", max(rango_vela_mediano * 0.8, 0.0012))
-            espaciado_pct = max(grid_step_optimo * grid_step_factor, 0.0012) # Mínimo 0.12% por comisiones
+            espaciado_pct = max(grid_step_optimo * grid_step_factor, min_grid_step)
         
         modo_final = str(modo or modo_preferido).upper()
         if modo_final == "NEUTRAL" and modo_preferido in {"LONG", "SHORT"}:
@@ -183,4 +190,6 @@ class OptimizadorGrid:
             "densidad_factor_final": round(densidad_final, 4),
             "capital_factor_final": round(capital_factor_final, 4),
             "apalancamiento_factor_final": round(leverage_factor_final, 4),
+            "fee_round_trip_pct": round(fee_round_trip_pct, 8),
+            "min_profit_pct": round(min_profit_pct, 8),
         }

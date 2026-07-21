@@ -111,6 +111,7 @@ class ExecutionProfile:
     limit: int
     fee_maker: float
     comision_rt: float
+    ganancia_min: float
     min_grid_step: float
 
 
@@ -257,6 +258,8 @@ def _flatten_analysis_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         "apalancamiento_factor": capital.get("apalancamiento_factor"),
         "modo_preferido": trend.get("modo_preferido"),
         "score": profile.get("metadata", {}).get("score"),
+        "fee_round_trip_pct": profile.get("execution", {}).get("comision_rt"),
+        "min_profit_pct": profile.get("execution", {}).get("ganancia_min"),
     }
 
 
@@ -316,6 +319,7 @@ def _construir_analysis_profile(
             limit=limit,
             fee_maker=round(float(fee_maker), 8),
             comision_rt=round(float(comision_rt), 8),
+            ganancia_min=round(float(min_grid_step - comision_rt), 8),
             min_grid_step=round(float(min_grid_step), 8),
         ),
         metadata={
