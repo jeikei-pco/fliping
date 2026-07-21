@@ -3,6 +3,53 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any
 
+
+def _normalizar_analisis(analisis: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Acepta el contrato nuevo del analizador ({symbol, analysis_profile}) y el
+    formato plano anterior, devolviendo un diccionario plano para los calculos.
+    """
+    if not analisis:
+        return {}
+
+    profile = analisis.get("analysis_profile") or analisis.get("analysis")
+    if not isinstance(profile, dict):
+        return analisis
+
+    market_data = profile.get("market_data", {})
+    volatility = profile.get("volatility", {})
+    trend = profile.get("trend", {})
+    grid = profile.get("grid", {})
+    risk = profile.get("risk", {})
+    capital = profile.get("capital", {})
+    metadata = profile.get("metadata", {})
+
+    normalized = dict(analisis)
+    normalized.update({
+        "symbol": profile.get("symbol", analisis.get("symbol")),
+        "precio": market_data.get("precio", analisis.get("precio")),
+        "ops_promedio": grid.get("ops_promedio", analisis.get("ops_promedio", 0)),
+        "velas_utiles_pct": grid.get("velas_utiles_pct", analisis.get("velas_utiles_pct", 0)),
+        "score": metadata.get("score", analisis.get("score", 0)),
+        "consistencia": volatility.get("consistencia", analisis.get("consistencia", 0)),
+        "oscilacion": grid.get("oscilacion", analisis.get("oscilacion", 0)),
+        "atr_pct": market_data.get("atr_pct", volatility.get("atr_pct", analisis.get("atr_pct", 0.003))),
+        "deriva_pct": market_data.get("deriva_pct", trend.get("deriva_pct", analisis.get("deriva_pct", 1.5))),
+        "rango_vela_mediano": market_data.get(
+            "rango_vela_mediano",
+            volatility.get("rango_vela_mediano", analisis.get("rango_vela_mediano", 0.001)),
+        ),
+        "grid_step_optimo": grid.get("grid_step_optimo", analisis.get("grid_step_optimo")),
+        "grid_quality": grid.get("grid_quality", analisis.get("grid_quality", analisis.get("zigzag_score", 0.5))),
+        "riesgo": risk.get("riesgo", analisis.get("riesgo", 0.5)),
+        "densidad_sugerida": grid.get("densidad_sugerida", analisis.get("densidad_sugerida", 1.0)),
+        "capital_factor": capital.get("capital_factor", analisis.get("capital_factor", 1.0)),
+        "apalancamiento_factor": capital.get("apalancamiento_factor", analisis.get("apalancamiento_factor", 1.0)),
+        "modo_preferido": trend.get("modo_preferido", analisis.get("modo_preferido", "NEUTRAL")),
+    })
+    return normalized
+
+
 class OptimizadorGrid:
     def __init__(self, multiplicador_riesgo: float = 1.2, max_leverage: int = 25, overrides: Dict[str, Any] = None):
         self.mult_riesgo = multiplicador_riesgo
@@ -14,6 +61,8 @@ class OptimizadorGrid:
         """
         Transforma el perfil del analizador en la configuracion final de la malla.
         """
+        analisis = _normalizar_analisis(analisis)
+
         if df is None or df.empty or len(df) < 15:
             return {"symbol": symbol, "valido": False}
 

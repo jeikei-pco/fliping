@@ -10,6 +10,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger("UAO_Sclaping.GridBacktester")
 
+
+def _normalizar_analisis_backtest(analisis: Dict[str, Any]) -> Dict[str, Any]:
+    from core.optimizador import _normalizar_analisis
+
+    return _normalizar_analisis(analisis)
+
 # ==========================================
 # 1. MOTOR DE SIMULACIÓN DINÁMICA (Réplica del Grid Futuros)
 # ==========================================
@@ -167,6 +173,7 @@ def _backtest_configuracion(
     ai_overrides: Optional[Dict[str, Any]] = None,
     df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
+    analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
     market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
     fee_maker = float(market.get("maker", 0.00020))
@@ -212,6 +219,7 @@ def _backtest_con_optimizador(
 ) -> Dict[str, Any]:
     from core.optimizador import OptimizadorGrid
 
+    analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
     try:
         df = _fetch_backtest_df(exchange, symbol)
@@ -241,6 +249,7 @@ def _backtest_grid_simbolo(
     overrides: Optional[Dict[str, Any]] = None,
     params_candidatos: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
 
     if params_candidatos:

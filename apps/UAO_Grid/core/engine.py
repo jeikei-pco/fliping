@@ -190,7 +190,7 @@ class GridEngine:
             
             # Pausa de seguridad al cambiar de dirección opuesta
             if modo_anterior in ["LONG", "SHORT"] and self.modo_estrategia in ["LONG", "SHORT"] and modo_anterior != self.modo_estrategia:
-                logger.warning(f"⏳ Pausa de Seguridad: Cambiando modo de {modo_anterior} a {self.modo_estrategia}. Esperando 3s para sincronización con el exchange...")
+                logger.warning(f"  Pausa de Seguridad: Cambiando modo de {modo_anterior} a {self.modo_estrategia}. Esperando 3s para sincronización con el exchange...")
                 time.sleep(3.0)
                 
         # Forzar NEUTRAL siempre, sin importar lo que dictamine la IA, para garantizar bidireccionalidad
@@ -204,9 +204,7 @@ class GridEngine:
         # 1. Salvar los Take Profits activos (niveles >= 100)
         tps_activos = [n for n in getattr(self, "niveles", []) if abs(n.get("level", 0)) >= 100]
 
-        # 2. Mapear que lineas originales ya fueron ejecutadas para no recrearlas.
-        # Si un TP es SELL, la original fue una BUY (nivel negativo).
-        # Si un TP es BUY, la original fue una SELL (nivel positivo).
+        # 2. Mapear qué lineas originales ya fueron ejecutadas para no recrearlas.
         niveles_cubiertos = set()
         for tp in tps_activos:
             nivel_base = abs(tp.get("level", 0)) // 100
@@ -223,38 +221,36 @@ class GridEngine:
 
         # 4. Dibujar nuevas lineas base, omitiendo las que ya tienen TP en curso.
         margen_seguro = getattr(self, 'min_spread_rentable', 0.0025)
-
         for i in range(1, self.num_lineas_lado + 1):
+            
+            # BLOQUE 1: Órdenes de VENTA (SHORT - Arriba del precio)
             if i not in niveles_cubiertos and modo_uso in ["NEUTRAL", "SHORT"]:
-                # LÓGICA ANTI-PÉRDIDAS PARA LONG: El precio base para vender (TP) 
-                # se calcula ahora desde el precio actual (centro_grid) en lugar del promedio,
-                # permitiendo cerrar en pérdida si el precio se desplaza y el grid lo requiere.
+                # LÓGICA ANTI-PÉRDIDAS PARA LONG
                 if self.posicion_neta > 1e-9:
                     piso_rentable = self.centro_grid * (1 + margen_seguro)
                     base_sell = max(self.centro_grid, piso_rentable)
                 else:
                     base_sell = self.centro_grid
-                    
+                
                 precio_sell = base_sell * (1 + (self.espaciado_actual * i))
                 qty_sell = self.inversion_por_nivel / precio_sell
                 self.niveles.append({"side": "SELL", "price": precio_sell, "qty": qty_sell, "level": i})
 
+            # BLOQUE 2: Órdenes de COMPRA (LONG - Abajo del precio)
+            # CORRECCIÓN: Este bloque ahora está correctamente alineado con el 'if' anterior
             if -i not in niveles_cubiertos and modo_uso in ["NEUTRAL", "LONG"]:
-                # LÓGICA ANTI-PÉRDIDAS PARA SHORT: El precio base para comprar (TP)
-                # se calcula ahora desde el precio actual (centro_grid) en lugar del promedio.
+                # LÓGICA ANTI-PÉRDIDAS PARA SHORT
                 if self.posicion_neta < -1e-9:
                     techo_rentable = self.centro_grid * (1 - margen_seguro)
                     base_buy = min(self.centro_grid, techo_rentable)
                 else:
                     base_buy = self.centro_grid
-                    
+                
                 precio_buy = base_buy * (1 - (self.espaciado_actual * i))
                 qty_buy = self.inversion_por_nivel / precio_buy
                 self.niveles.append({"side": "BUY", "price": precio_buy, "qty": qty_buy, "level": -i})
 
         self.malla_modificada = True
-
-    # ── KILL SWITCH ──
 
     def evaluar_kill_switch(self, precio_actual: float) -> bool:
         """Edge Case 8: Stop-Loss Global si pérdida excede el % del capital."""

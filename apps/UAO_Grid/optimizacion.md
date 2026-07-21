@@ -1,308 +1,631 @@
-Con la arquitectura que tienes, **no es necesario modificar muchos archivos**. Lo ideal es mantener la responsabilidad de cada módulo.
+## Plan de Implementación Scrum
 
-## 1. `analizador.py` (cambios menores) ⭐
+### Proyecto: Integración del Analizador → IA → Optimizador → Backtester → Trading
 
-Este archivo ya calcula casi todas las métricas necesarias.
+---
 
-Sólo agregaría algunas métricas que el optimizador podría aprovechar:
+# Objetivo General
 
-* `riesgo_volatilidad`
-* `indice_tendencia`
-* `indice_reversion`
-* `eficiencia_grid`
-* `grid_quality`
+Rediseñar el flujo de decisión para que **cada símbolo sea completamente independiente**, donde el Analizador produzca un perfil cuantitativo completo, la IA genere recomendaciones específicas, el Optimizador construya la configuración final, el Backtester la valide y el Orquestador opere únicamente configuraciones rentables.
 
-Es decir, el analizador debe entregar un **perfil completo del símbolo**, no sólo estadísticas.
+---
 
-Su responsabilidad debe ser:
+# Arquitectura Objetivo
 
+```text
+            Scanner
+                │
+                ▼
+      Analizador Cuantitativo
+                │
+                ▼
+      Perfil Completo Symbol
+                │
+                ▼
+        IA Táctica (LLM)
+                │
+                ▼
+      Overrides por Symbol
+                │
+                ▼
+      Optimizador Matemático
+                │
+                ▼
+ Configuración Final del Grid
+                │
+                ▼
+         Backtester
+                │
+                ▼
+      Score de Rentabilidad
+                │
+                ▼
+         Ranking Final
+                │
+                ▼
+        Grid Engine
+                │
+                ▼
+         Trading Real
+
+──────────────────────────────────────
+
+        IA Estratégica (24h)
+
+ Histórico de operaciones
+        ↓
+Aprendizaje por símbolo
+        ↓
+Overrides persistentes
 ```
-OHLCV
-      ↓
-Análisis
-      ↓
-Métricas
-      ↓
-Perfil del símbolo
-```
 
-Ejemplo:
+---
+
+# Product Backlog
+
+## Epic 1
+
+### Nuevo Pipeline Inteligente
+
+Objetivo
+
+Separar completamente cada etapa del proceso.
+
+Historias
+
+* Como motor de trading quiero que el Analizador entregue un perfil completo por símbolo.
+* Como Optimizador quiero recibir únicamente el perfil del Analizador y los ajustes IA.
+* Como Backtester quiero ejecutar exactamente la configuración optimizada.
+* Como Orquestador quiero recibir un único objeto consolidado.
+
+---
+
+## Epic 2
+
+IA Táctica
+
+Objetivo
+
+Crear una IA online que participe durante cada ciclo de escaneo.
+
+---
+
+## Epic 3
+
+IA Estratégica
+
+Objetivo
+
+Mantener aprendizaje histórico independiente.
+
+---
+
+## Epic 4
+
+Nuevo modelo de datos
+
+Objetivo
+
+Eliminar múltiples diccionarios dispersos.
+
+---
+
+# Sprint 1
+
+## Refactor Analizador
+
+Duración
+
+1 semana
+
+Objetivo
+
+Que el Analizador produzca absolutamente toda la información necesaria.
+
+### Tareas
+
+### Crear AnalysisProfile
 
 ```python
-return {
+AnalysisProfile
 
-    ...
+symbol
 
-    "score": score,
+market_data
 
-    "zigzag_score": zigzag_score,
+volatility
 
-    "grid_step_optimo": ...,
+trend
 
-    "grid_quality": 0.91,
+grid
 
-    "riesgo":0.42,
+risk
 
-    "densidad_sugerida":1.18,
+capital
 
-    "capital_factor":1.10,
+execution
 
-    "apalancamiento_factor":0.94,
+metadata
+```
 
-    "modo_preferido":"LONG"
+---
+
+### Analizador devuelve
+
+```python
+{
+    symbol
+
+    analysis
+}
+```
+
+Eliminar múltiples variables sueltas.
+
+---
+
+### Agregar
+
+* Grid Profile
+
+* Risk Profile
+
+* Capital Profile
+
+* Trend Profile
+
+* Execution Profile
+
+---
+
+### Entregable
+
+```python
+analysis_profile
+```
+
+único.
+
+---
+
+# Sprint 2
+
+## IA Táctica
+
+Duración
+
+1 semana
+
+---
+
+Crear nuevo módulo
+
+```
+ai_runtime_optimizer.py
+```
+
+Responsabilidad
+
+Recibir
+
+```
+AnalysisProfile
+```
+
+y responder
+
+```
+RuntimeOverrides
+```
+
+Ejemplo
+
+```python
+{
+    leverage_factor
+
+    density_factor
+
+    grid_step_factor
+
+    capital_factor
+
+    preferred_mode
+}
+```
+
+No toca base de datos.
+
+No aprende.
+
+No guarda nada.
+
+---
+
+Entregable
+
+```
+RuntimeOverrides
+```
+
+---
+
+# Sprint 3
+
+## Refactor del Optimizador
+
+Duración
+
+1 semana
+
+---
+
+Entrada
+
+```
+AnalysisProfile
+
++
+
+RuntimeOverrides
+
++
+
+HistoricalOverrides
+```
+
+Salida
+
+```
+OptimizationProfile
+```
+
+Ejemplo
+
+```python
+{
+
+grid_spacing
+
+grid_lines
+
+leverage
+
+capital
+
+risk
+
+mode
+
+expected_profit
 
 }
 ```
 
----
+No vuelve a calcular ATR.
 
-# 2. `optimizador.py` (cambios grandes) ⭐⭐⭐⭐⭐
+No vuelve a calcular Score.
 
-Aquí es donde está el verdadero trabajo.
+No vuelve a calcular Riesgo.
 
-Actualmente el optimizador vuelve a calcular muchas cosas usando reglas fijas.
-
-Por ejemplo:
-
-```
-ATR
-
-↓
-
-apalancamiento
-
-↓
-
-espaciado
-
-↓
-
-grids
-```
-
-Yo eliminaría la mayoría de esas reglas.
-
-En cambio haría que utilice directamente:
-
-```
-analisis["capital_factor"]
-
-analisis["grid_quality"]
-
-analisis["riesgo"]
-
-analisis["densidad_sugerida"]
-
-analisis["modo_preferido"]
-
-analisis["apalancamiento_factor"]
-```
-
-El optimizador sólo debería transformar esas sugerencias en parámetros finales.
+Solo transforma.
 
 ---
 
-# 3. Motor de IA (`overrides`) ⭐⭐⭐
+# Sprint 4
 
-Si tienes un archivo donde la IA genera algo como:
+## Refactor Backtester
 
-```
-GRID_DENSITY_FACTOR
+Duración
 
-CAPITAL_FACTOR
-
-LEVERAGE_FACTOR
-
-GRID_STEP_PCT
-
-...
-```
-
-también lo modificaría.
-
-Actualmente parece reemplazar decisiones.
-
-Debería hacer únicamente esto:
-
-```
-matemática
-      ↓
-IA
-      ↓
-multiplicadores
-      ↓
-resultado final
-```
-
-Nunca reemplazar.
+1 semana
 
 ---
 
-# 4. Backtester (si existe) ⭐⭐⭐
-
-Si tienes un archivo parecido a:
+Entrada
 
 ```
-backtest.py
-
-grid_backtester.py
-
-simulator.py
+OptimizationProfile
 ```
 
-también merece cambios.
-
-¿Por qué?
-
-Porque él sabe realmente cuál configuración produjo más beneficio.
-
-Podría devolver:
+Salida
 
 ```
-LONG
+BacktestProfile
+```
 
-SHORT
+Ejemplo
 
-NEUTRAL
-
-spacing ideal
-
-grids ideales
-
-lev ideal
+```python
+{
 
 ROI
 
-Drawdown
+PnL
+
+PF
 
 WinRate
+
+DD
+
+Trades
+
+}
 ```
 
-Esas métricas pueden alimentar nuevamente al optimizador.
+No modifica parámetros.
+
+No optimiza.
+
+Solo valida.
 
 ---
 
-# 5. Base de datos (muy recomendable)
+# Sprint 5
 
-Si guardas los resultados del analizador, agregaría columnas nuevas:
+## Refactor Orquestador
 
-```
-symbol
+Duración
 
-score
+1 semana
 
-grid_quality
-
-zigzag
-
-riesgo
-
-capital_factor
-
-densidad
-
-spacing
-
-modo
-
-apalancamiento
-
-fecha
-```
-
-Luego puedes entrenar el optimizador con histórico.
-
----
-
-# 6. Configuración global
-
-Si existe un archivo como
+Pipeline
 
 ```
-config.py
+Scanner
 
-settings.py
+↓
 
-strategy.py
-```
+Analizador
 
-yo movería allí únicamente límites globales:
+↓
 
-```
-MIN_GRID
+IA Runtime
 
-MAX_GRID
+↓
 
-MAX_LEVERAGE
+Optimizador
 
-MIN_MARGIN
-
-MAX_CAPITAL
-
-RIESGO_MAXIMO
-```
-
-Todo lo demás debería salir del analizador.
-
----
-
-## Arquitectura recomendada
-
-```
-Exchange
-
-      │
-
-      ▼
-
-analizador.py
-      │
-      │
-      ▼
-Perfil del símbolo
-(score,
-zigzag,
-riesgo,
-spacing,
-densidad,
-capital,
-modo)
-
-      │
-
-      ▼
-
-optimizador.py
-      │
-      │
-      ▼
-Configuración final del Grid
-
-      │
-
-      ▼
+↓
 
 Backtester
 
-      │
+↓
 
-      ▼
+Ranking
 
-Resultados
+↓
 
-      │
-
-      ▼
-
-IA
+Trading
 ```
 
-## Prioridad de cambios
+Cada símbolo mantiene
 
-1. **`optimizador.py`** ⭐⭐⭐⭐⭐ (mayor impacto)
-2. **`analizador.py`** ⭐⭐⭐⭐ (enriquecer el perfil del símbolo)
-3. **Backtester** ⭐⭐⭐⭐ (si existe, para retroalimentar la optimización)
-4. **Módulo de IA / overrides** ⭐⭐⭐ (que actúe como multiplicador y no como reemplazo)
-5. **Base de datos** ⭐⭐ (para aprendizaje histórico)
+```
+AnalysisProfile
 
-Con esos cambios, el sistema pasará de usar un conjunto de reglas generales a optimizar **cada símbolo de forma independiente** utilizando las métricas calculadas por el analizador y, opcionalmente, los resultados históricos del backtest.
+OptimizationProfile
+
+BacktestProfile
+```
+
+sin mezclarse.
+
+---
+
+# Sprint 6
+
+## Nuevo Ranking
+
+Actualmente
+
+```
+Score
+```
+
+Nuevo
+
+```
+Ranking =
+40% Backtest
+
+30% Analysis
+
+20% IA
+
+10% Liquidez
+```
+
+Ejemplo
+
+```
+BTC
+
+Analysis 91
+
+Backtest 97
+
+IA 88
+
+Liquidity 100
+
+Final 94.3
+```
+
+---
+
+# Sprint 7
+
+## Persistencia
+
+Guardar
+
+```
+AnalysisProfile
+
+OptimizationProfile
+
+BacktestProfile
+```
+
+por símbolo.
+
+Esto permitirá posteriormente entrenar modelos.
+
+---
+
+# Sprint 8
+
+## IA Estratégica
+
+Mantener
+
+```
+AIOptimizerWorker
+```
+
+Pero cambiar su entrada.
+
+Actualmente
+
+```
+Trades
+
+Scanner
+```
+
+Nuevo
+
+```
+Analysis Profiles
+
+Optimization Profiles
+
+Backtests
+
+Trades
+
+Drawdowns
+
+Rotaciones
+
+Profit Factor
+
+Tiempo en mercado
+
+Capital utilizado
+```
+
+La IA aprenderá sobre decisiones completas.
+
+---
+
+# Sprint 9
+
+## Telemetría
+
+Dashboard
+
+Por símbolo visualizar
+
+```
+Analysis
+
+↓
+
+IA Runtime
+
+↓
+
+Optimization
+
+↓
+
+Backtest
+
+↓
+
+Trading
+
+↓
+
+Resultado Real
+```
+
+Permitirá saber exactamente dónde falla un símbolo.
+
+---
+
+# Sprint 10
+
+## Validación automática
+
+Agregar pruebas
+
+```
+Analizador
+
+↓
+
+Optimizador
+
+↓
+
+Backtest
+```
+
+para 100 símbolos.
+
+Comparar
+
+```
+Configuración antigua
+
+vs
+
+Nueva arquitectura
+```
+
+---
+
+# Definición de Done (DoD)
+
+Cada historia estará completa cuando:
+
+* El componente tenga pruebas unitarias.
+* El flujo no recalcule métricas ya obtenidas.
+* Cada símbolo conserve su contexto independiente.
+* El tiempo de procesamiento por símbolo no aumente más de un 10%.
+* El backtest utilice exactamente los parámetros producidos por el optimizador.
+* El orquestador solo opere configuraciones validadas.
+
+---
+
+# Riesgos identificados
+
+| Riesgo                                        | Impacto | Mitigación                                                                                                         |
+| --------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------ |
+| Incremento de latencia por IA táctica         | Alto    | Ejecutar IA en paralelo y usar caché con tiempo de vida configurable.                                              |
+| Inconsistencia entre IA táctica y estratégica | Medio   | Definir reglas claras de precedencia (por ejemplo, IA estratégica como base e IA táctica como ajuste fino).        |
+| Regresiones durante el refactor               | Alto    | Mantener compatibilidad temporal mediante adaptadores y pruebas de regresión.                                      |
+| Sobrecarga del LLM                            | Medio   | Limitar llamadas por símbolo, reutilizar respuestas cuando el perfil cambie poco y definir un modo de degradación. |
+
+---
+
+# Roadmap estimado
+
+| Sprint    | Objetivo                                                     |
+| --------- | ------------------------------------------------------------ |
+| Sprint 1  | Refactor del Analizador y creación de `AnalysisProfile`      |
+| Sprint 2  | Implementación de la IA táctica (`RuntimeOverrides`)         |
+| Sprint 3  | Refactor del Optimizador y creación de `OptimizationProfile` |
+| Sprint 4  | Refactor del Backtester y creación de `BacktestProfile`      |
+| Sprint 5  | Integración del nuevo pipeline en el Orquestador             |
+| Sprint 6  | Nuevo sistema de ranking multicriterio                       |
+| Sprint 7  | Persistencia de perfiles y trazabilidad                      |
+| Sprint 8  | Evolución de la IA estratégica basada en perfiles completos  |
+| Sprint 9  | Dashboard y telemetría del flujo de decisión                 |
+| Sprint 10 | Validación, pruebas de carga y despliegue                    |
+
+Este plan mantiene entregas incrementales y funcionales en cada sprint, reduce el riesgo de una reescritura completa y permite validar el rendimiento del nuevo pipeline antes de avanzar al siguiente nivel de complejidad.

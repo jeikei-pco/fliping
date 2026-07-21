@@ -300,9 +300,17 @@ class Database:
         analyzer_metrics = analyzer_metrics or {}
         final_params = final_params or {}
         backtest_metrics = backtest_metrics or {}
-        grid_quality = float(analyzer_metrics.get("grid_quality", final_params.get("grid_quality", 0.0)) or 0.0)
-        riesgo = float(analyzer_metrics.get("riesgo", final_params.get("riesgo", 0.0)) or 0.0)
-        modo_preferido = str(analyzer_metrics.get("modo_preferido", final_params.get("modo", "NEUTRAL")) or "NEUTRAL")
+        analysis_profile = analyzer_metrics.get("analysis_profile") or analyzer_metrics.get("analysis") or {}
+        grid_profile = analysis_profile.get("grid", {}) if isinstance(analysis_profile, dict) else {}
+        risk_profile = analysis_profile.get("risk", {}) if isinstance(analysis_profile, dict) else {}
+        trend_profile = analysis_profile.get("trend", {}) if isinstance(analysis_profile, dict) else {}
+        grid_quality = float(
+            analyzer_metrics.get("grid_quality", grid_profile.get("grid_quality", final_params.get("grid_quality", 0.0))) or 0.0
+        )
+        riesgo = float(analyzer_metrics.get("riesgo", risk_profile.get("riesgo", final_params.get("riesgo", 0.0))) or 0.0)
+        modo_preferido = str(
+            analyzer_metrics.get("modo_preferido", trend_profile.get("modo_preferido", final_params.get("modo", "NEUTRAL"))) or "NEUTRAL"
+        )
 
         with self._lock:
             with self._get_connection() as conn:

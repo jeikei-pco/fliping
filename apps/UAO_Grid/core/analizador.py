@@ -2,7 +2,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import pandas as pd
@@ -51,6 +51,80 @@ class GridMetrics:
     capital_factor: float
     apalancamiento_factor: float
     modo_preferido: str
+
+
+@dataclass
+class MarketDataProfile:
+    precio: float
+    rango_vela_mediano: float
+    recorrido_real: float
+    atr_pct: float
+    deriva_pct: float
+
+
+@dataclass
+class VolatilityProfile:
+    atr_pct: float
+    rango_vela_mediano: float
+    riesgo_volatilidad: float
+    consistencia: float
+    amplitude_ratio: float
+
+
+@dataclass
+class TrendProfile:
+    indice_tendencia: float
+    indice_reversion: float
+    modo_preferido: str
+    deriva_pct: float
+
+
+@dataclass
+class GridProfile:
+    grid_step_optimo: float
+    eficiencia_grid: float
+    grid_quality: float
+    densidad_sugerida: float
+    ops_promedio: float
+    velas_utiles_pct: float
+    zigzag_score: float
+    oscilacion: float
+    simetria: float
+
+
+@dataclass
+class RiskProfile:
+    riesgo: float
+    riesgo_volatilidad: float
+    indice_tendencia: float
+
+
+@dataclass
+class CapitalProfile:
+    capital_factor: float
+    apalancamiento_factor: float
+
+
+@dataclass
+class ExecutionProfile:
+    timeframe: str
+    limit: int
+    fee_maker: float
+    comision_rt: float
+    min_grid_step: float
+
+
+@dataclass
+class AnalysisProfile:
+    symbol: str
+    market_data: MarketDataProfile
+    volatility: VolatilityProfile
+    trend: TrendProfile
+    grid: GridProfile
+    risk: RiskProfile
+    capital: CapitalProfile
+    execution: ExecutionProfile
+    metadata: Dict[str, Any]
 
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
@@ -142,6 +216,115 @@ def _calcular_perfil_operativo(
         "apalancamiento_factor": round(apalancamiento_factor, 4),
         "modo_preferido": modo_preferido,
     }
+
+
+def _flatten_analysis_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Expone alias planos para compatibilidad con optimizador, backtester, IA y DB.
+    El contrato nuevo es analysis_profile; estos campos se mantienen mientras se
+    migra el resto del pipeline.
+    """
+    market_data = profile.get("market_data", {})
+    volatility = profile.get("volatility", {})
+    trend = profile.get("trend", {})
+    grid = profile.get("grid", {})
+    risk = profile.get("risk", {})
+    capital = profile.get("capital", {})
+
+    return {
+        "symbol": profile.get("symbol"),
+        "precio": market_data.get("precio"),
+        "ops_promedio": grid.get("ops_promedio"),
+        "velas_utiles_pct": grid.get("velas_utiles_pct"),
+        "consistencia": volatility.get("consistencia"),
+        "simetria": grid.get("simetria"),
+        "oscilacion": grid.get("oscilacion"),
+        "deriva_pct": market_data.get("deriva_pct"),
+        "zigzag_score": grid.get("zigzag_score"),
+        "amplitude_ratio": volatility.get("amplitude_ratio"),
+        "recorrido_real": market_data.get("recorrido_real"),
+        "grid_step_optimo": grid.get("grid_step_optimo"),
+        "atr_pct": market_data.get("atr_pct"),
+        "rango_vela_mediano": market_data.get("rango_vela_mediano"),
+        "riesgo_volatilidad": risk.get("riesgo_volatilidad"),
+        "indice_tendencia": trend.get("indice_tendencia"),
+        "indice_reversion": trend.get("indice_reversion"),
+        "eficiencia_grid": grid.get("eficiencia_grid"),
+        "grid_quality": grid.get("grid_quality"),
+        "riesgo": risk.get("riesgo"),
+        "densidad_sugerida": grid.get("densidad_sugerida"),
+        "capital_factor": capital.get("capital_factor"),
+        "apalancamiento_factor": capital.get("apalancamiento_factor"),
+        "modo_preferido": trend.get("modo_preferido"),
+        "score": profile.get("metadata", {}).get("score"),
+    }
+
+
+def _construir_analysis_profile(
+    metrics: GridMetrics,
+    *,
+    timeframe: str,
+    limit: int,
+    fee_maker: float,
+    comision_rt: float,
+    min_grid_step: float,
+) -> Dict[str, Any]:
+    profile = AnalysisProfile(
+        symbol=metrics.symbol,
+        market_data=MarketDataProfile(
+            precio=metrics.precio,
+            rango_vela_mediano=metrics.rango_vela_mediano,
+            recorrido_real=metrics.recorrido_real,
+            atr_pct=metrics.atr_pct,
+            deriva_pct=metrics.deriva_pct,
+        ),
+        volatility=VolatilityProfile(
+            atr_pct=metrics.atr_pct,
+            rango_vela_mediano=metrics.rango_vela_mediano,
+            riesgo_volatilidad=metrics.riesgo_volatilidad,
+            consistencia=metrics.consistencia,
+            amplitude_ratio=metrics.amplitude_ratio,
+        ),
+        trend=TrendProfile(
+            indice_tendencia=metrics.indice_tendencia,
+            indice_reversion=metrics.indice_reversion,
+            modo_preferido=metrics.modo_preferido,
+            deriva_pct=metrics.deriva_pct,
+        ),
+        grid=GridProfile(
+            grid_step_optimo=metrics.grid_step_optimo,
+            eficiencia_grid=metrics.eficiencia_grid,
+            grid_quality=metrics.grid_quality,
+            densidad_sugerida=metrics.densidad_sugerida,
+            ops_promedio=metrics.ops_promedio,
+            velas_utiles_pct=metrics.velas_utiles_pct,
+            zigzag_score=metrics.zigzag_score,
+            oscilacion=metrics.oscilacion,
+            simetria=metrics.simetria,
+        ),
+        risk=RiskProfile(
+            riesgo=metrics.riesgo,
+            riesgo_volatilidad=metrics.riesgo_volatilidad,
+            indice_tendencia=metrics.indice_tendencia,
+        ),
+        capital=CapitalProfile(
+            capital_factor=metrics.capital_factor,
+            apalancamiento_factor=metrics.apalancamiento_factor,
+        ),
+        execution=ExecutionProfile(
+            timeframe=timeframe,
+            limit=limit,
+            fee_maker=round(float(fee_maker), 8),
+            comision_rt=round(float(comision_rt), 8),
+            min_grid_step=round(float(min_grid_step), 8),
+        ),
+        metadata={
+            "score": metrics.score,
+            "schema_version": "analysis_profile.v1",
+            "generated_at": int(time.time()),
+        },
+    )
+    return asdict(profile)
 
 
 def _fetch_5m(exchange: Any, symbol: str, limit: int) -> pd.DataFrame:
@@ -406,8 +589,20 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
             apalancamiento_factor=perfil_operativo["apalancamiento_factor"],
             modo_preferido=perfil_operativo["modo_preferido"],
         )
-        
-        return metrics.__dict__
+
+        analysis_profile = _construir_analysis_profile(
+            metrics,
+            timeframe=timeframe,
+            limit=limit,
+            fee_maker=fee_maker,
+            comision_rt=comision_rt_dinamica,
+            min_grid_step=min_step_posible,
+        )
+        flattened = _flatten_analysis_profile(analysis_profile)
+        flattened["analysis_profile"] = analysis_profile
+        flattened["analysis"] = analysis_profile
+
+        return flattened
     
     except Exception as e:
         logger.debug("%s %s", symbol, e)

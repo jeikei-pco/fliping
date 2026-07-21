@@ -17,6 +17,40 @@ from core.adapters.ai_provider_factory import get_api_providers
 
 logger = logging.getLogger("UAO_Sclaping.AIOptimizer")
 
+
+def _perfil_analisis(item: Dict[str, Any]) -> Dict[str, Any]:
+    analisis = item.get("analisis_original") if isinstance(item.get("analisis_original"), dict) else item
+    profile = analisis.get("analysis_profile") or analisis.get("analysis")
+    return profile if isinstance(profile, dict) else {}
+
+
+def _contexto_cuantitativo_symbol(scan_data: Dict[str, Any]) -> Dict[str, Any]:
+    profile = _perfil_analisis(scan_data)
+    if profile:
+        return profile
+
+    return {
+        "symbol": scan_data.get("symbol"),
+        "metadata": {"score": scan_data.get("score", 0)},
+        "volatility": {
+            "consistencia": scan_data.get("consistencia", 0),
+            "atr_pct": scan_data.get("atr_pct", 0),
+        },
+        "grid": {
+            "oscilacion": scan_data.get("oscilacion", 0),
+            "ops_promedio": scan_data.get("ops_promedio", 0),
+            "grid_quality": scan_data.get("grid_quality", 0),
+            "densidad_sugerida": scan_data.get("densidad_sugerida", 1.0),
+        },
+        "risk": {"riesgo": scan_data.get("riesgo", 0)},
+        "trend": {"modo_preferido": scan_data.get("modo_preferido", "NEUTRAL")},
+        "capital": {
+            "capital_factor": scan_data.get("capital_factor", 1.0),
+            "apalancamiento_factor": scan_data.get("apalancamiento_factor", 1.0),
+        },
+    }
+
+
 class AIOptimizerWorker(threading.Thread):
     def __init__(self, db: Database):
         super().__init__(daemon=True)
@@ -78,10 +112,7 @@ class AIOptimizerWorker(threading.Thread):
             wr = stat["wins"] / stat["trades"] * 100
             scan_data = scanner_dict.get(sym, {})
             combined_symbols[sym] = {
-                "score_analizador": scan_data.get("score", 0),
-                "consistencia": scan_data.get("consistencia", 0),
-                "oscilacion": scan_data.get("oscilacion", 0),
-                "ops_promedio": scan_data.get("ops_promedio", 0),
+                "analysis_profile": _contexto_cuantitativo_symbol(scan_data),
                 "win_rate_real": round(wr, 2),
                 "profit_factor_real": round(pf, 2),
                 "pnl_real": round(stat["pnl"], 2),
@@ -255,9 +286,25 @@ Ejemplo:
         envía todo en un solo JSON a la IA y retorna un diccionario con los overrides granulares por símbolo.
         """
         import datetime
+        top_candidates = []
+        for item in top_3_symbols_data:
+            top_candidates.append({
+                "symbol": item.get("symbol"),
+                "analysis_profile": _contexto_cuantitativo_symbol(item),
+                "base_backtest": {
+                    "pnl_neto": item.get("pnl_neto", 0.0),
+                    "roi_pct": item.get("roi_pct", 0.0),
+                    "drawdown": item.get("drawdown", 0.0),
+                    "win_rate": item.get("win_rate", 0.0),
+                    "profit_factor": item.get("profit_factor", 0.0),
+                    "operaciones": item.get("operaciones", 0),
+                },
+                "params_optimos": item.get("params_optimos", {}),
+            })
+
         context = {
             "timestamp": datetime.datetime.utcnow().isoformat(),
-            "top_candidates": top_3_symbols_data
+            "top_candidates": top_candidates
         }
         
         prompt = f"""
