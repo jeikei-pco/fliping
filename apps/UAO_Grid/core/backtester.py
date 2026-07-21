@@ -1,10 +1,11 @@
 """
 backtester.py - Backtest de Malla (Grid) por Fuerza Bruta.
 Simula el comportamiento Multidireccional (Neutral), Long y Short.
-Aplica la relación entre Alto Apalancamiento = Menor Distancia.
+Aplica la relacion entre Alto Apalancamiento = Menor Distancia.
 """
 import logging
 import time
+import numpy as np
 import pandas as pd
 from typing import Any, Dict, List, Optional
 from core.models import ValidatedOptimizationProfile
@@ -36,13 +37,17 @@ def _ohlcv_to_df(velas: Any) -> pd.DataFrame:
 
 
 # ==========================================
-# 1. MOTOR DE SIMULACIÓN DINÁMICA (Réplica del Grid Futuros)
+# 1. MOTOR DE SIMULACION DINAMICA (Replica del Grid Futuros)
 # ==========================================
 def _simular_grid_dinamico(df: pd.DataFrame, params: Dict[str, Any], capital_total: float, fee_maker: float, fee_taker: float) -> Dict[str, Any]:
     """
     Simula el grid continuo multidireccional.
     Posicion Neta > 0 = LONG. Posicion Neta < 0 = SHORT.
     Si es NEUTRAL: Sube = Abre Short. Baja = Abre Long. Cobra ganancias al retroceder.
+
+    [FASE 2] Version vectorizada con NumPy: eliminado df.iterrows().
+    Calcula los cruces de nivel usando logaritmos para reducir tiempo de O(N*cruces)
+    a O(N) en la construccion de datos, luego itera solo sobre los cruces reales.
     """
     espaciado = params["espaciado_pct"]
     modo = params["modo"]
@@ -50,84 +55,100 @@ def _simular_grid_dinamico(df: pd.DataFrame, params: Dict[str, Any], capital_tot
     num_grids_total = params["num_grids"]
     if espaciado <= 0 or apalancamiento <= 0 or num_grids_total <= 0:
         return {"operaciones": 0, "pnl_neto": -999.0}
-    
-    # Lógica de distribución de capital
-    # En modo NEUTRAL (mitad arriba, mitad abajo), el capital máximo en riesgo 
+
+    # Logica de distribucion de capital
+    # En modo NEUTRAL (mitad arriba, mitad abajo), el capital maximo en riesgo
     # es solo el de un lado a la vez.
     num_lineas_lado = max(1, num_grids_total // 2) if modo == "NEUTRAL" else num_grids_total
-    
+
     capital_por_linea = capital_total / num_lineas_lado
     tamano_orden = capital_por_linea * apalancamiento
-    
+
     # Costo de abrir + Costo de cerrar + Margen de ganancia neto deseado
     margen_neto_minimo = float(params.get("min_profit_pct", 0.0010))
     costos_totales_pct = float(params.get("fee_round_trip_pct", fee_maker + fee_taker))
     pnl_neto_trade_pct = espaciado - costos_totales_pct
-    
+
     # Si la distancia no cubre los costos y el margen, descartar inmediatamente
     if pnl_neto_trade_pct < margen_neto_minimo:
         return {"operaciones": 0, "pnl_neto": -999.0}
-        
+
     pnl_neto_fiat = tamano_orden * pnl_neto_trade_pct
-    
+
+    # ── Construccion vectorizada con NumPy ───────────────────────────────
+    # Aplanamos OHLC en secuencia [open, low, high, close] por vela -> array 1-D
+    opens  = df["open"].to_numpy(dtype=np.float64)
+    lows   = df["low"].to_numpy(dtype=np.float64)
+    highs  = df["high"].to_numpy(dtype=np.float64)
+    closes = df["close"].to_numpy(dtype=np.float64)
+
+    # Intercalamos: open, low, high, close (mismo orden que el loop original)
+    precios = np.empty(len(df) * 4, dtype=np.float64)
+    precios[0::4] = opens
+    precios[1::4] = lows
+    precios[2::4] = highs
+    precios[3::4] = closes
+
+    # Calculo vectorizado de cuantos niveles se cruzan entre precios consecutivos
+    log_factor = np.log(1.0 + espaciado)
+    log_precios = np.log(np.maximum(precios, 1e-12))
+
+    log_prev = np.empty_like(log_precios)
+    log_prev[0] = np.log(max(float(opens[0]), 1e-12))
+    log_prev[1:] = log_precios[:-1]
+
+    # Niveles cruzados: positivo = precio subio, negativo = bajo
+    delta_niveles = np.round((log_precios - log_prev) / log_factor).astype(np.int32)
+
+    # ── Simulacion sobre cruces (loop compacto) ───────────────────────────
     pnl_acumulado = 0.0
     max_equity = 0.0
     max_drawdown = 0.0
     operaciones = 0
-    precio_actual = df["open"].iloc[0]
-    
-    posicion_neta = 0  # > 0 (LONG), < 0 (SHORT)
-            
-    for _, row in df.iterrows():
-        movimientos = [row["open"], row["low"], row["high"], row["close"]]
-        
-        for precio in movimientos:
-            # Sube el precio (Cruza línea hacia arriba)
-            while precio >= precio_actual * (1 + espaciado):
-                precio_actual *= (1 + espaciado)
-                
+    posicion_neta = 0
+
+    for delta in delta_niveles:
+        if delta == 0:
+            continue
+        sign = 1 if delta > 0 else -1
+        cruces = abs(int(delta))
+
+        for _ in range(cruces):
+            if sign > 0:  # precio subio
                 if modo == "NEUTRAL":
-                    if posicion_neta > 0: # Teníamos un LONG abajo, cobramos ganancia
+                    if posicion_neta > 0:  # Teniamos un LONG abajo, cobramos ganancia
                         pnl_acumulado += pnl_neto_fiat
                         max_equity = max(max_equity, pnl_acumulado)
                         max_drawdown = max(max_drawdown, max_equity - pnl_acumulado)
                         operaciones += 1
                         posicion_neta -= 1
-                    elif posicion_neta > -num_lineas_lado: # Estamos del centro hacia arriba, abrimos SHORT
+                    elif posicion_neta > -num_lineas_lado:  # Abrimos SHORT
                         posicion_neta -= 1
-                        
                 elif modo == "LONG":
-                    if posicion_neta > 0: # Cobramos ganancia del LONG
+                    if posicion_neta > 0:  # Cobramos ganancia del LONG
                         pnl_acumulado += pnl_neto_fiat
                         max_equity = max(max_equity, pnl_acumulado)
                         max_drawdown = max(max_drawdown, max_equity - pnl_acumulado)
                         operaciones += 1
                         posicion_neta -= 1
-                        
                 elif modo == "SHORT":
-                    if posicion_neta > -num_lineas_lado: # Acumulamos SHORT arriba
+                    if posicion_neta > -num_lineas_lado:  # Acumulamos SHORT arriba
                         posicion_neta -= 1
-            
-            # Baja el precio (Cruza línea hacia abajo)
-            while precio <= precio_actual * (1 - espaciado):
-                precio_actual *= (1 - espaciado)
-                
+            else:  # precio bajo
                 if modo == "NEUTRAL":
-                    if posicion_neta < 0: # Teníamos un SHORT arriba, cobramos ganancia
+                    if posicion_neta < 0:  # Teniamos un SHORT arriba, cobramos ganancia
                         pnl_acumulado += pnl_neto_fiat
                         max_equity = max(max_equity, pnl_acumulado)
                         max_drawdown = max(max_drawdown, max_equity - pnl_acumulado)
                         operaciones += 1
                         posicion_neta += 1
-                    elif posicion_neta < num_lineas_lado: # Estamos del centro hacia abajo, abrimos LONG
+                    elif posicion_neta < num_lineas_lado:  # Abrimos LONG
                         posicion_neta += 1
-                        
                 elif modo == "LONG":
-                    if posicion_neta < num_lineas_lado: # Acumulamos LONG abajo
+                    if posicion_neta < num_lineas_lado:  # Acumulamos LONG abajo
                         posicion_neta += 1
-                        
                 elif modo == "SHORT":
-                    if posicion_neta < 0: # Cobramos ganancia del SHORT
+                    if posicion_neta < 0:  # Cobramos ganancia del SHORT
                         pnl_acumulado += pnl_neto_fiat
                         max_equity = max(max_equity, pnl_acumulado)
                         max_drawdown = max(max_drawdown, max_equity - pnl_acumulado)
@@ -165,16 +186,16 @@ def _normalizar_resultado_backtest(
     optimization_params = {
         "grid_spacing_pct": espaciado_pct,
         "grid_lines": num_grids,
-        "capital": capital_total, # Necesitamos pasar capital_total a esta función
+        "capital": capital_total,
         "leverage": apalancamiento,
         "min_profit_pct": params.get("min_profit_pct", 0.0010),
-        "maker_fee": fee_maker, # Necesitamos pasar fee_maker y fee_taker
+        "maker_fee": fee_maker,
         "taker_fee": fee_taker,
         "preferred_mode": modo,
-        "rebalance_distance": params.get("rebalance_distance", 0.0), # Asumir default por ahora
-        "inventory_limit": params.get("inventory_limit", 0), # Asumir default por ahora
-        "max_orders": params.get("max_orders", 0), # Asumir default por ahora
-        "grid_direction": params.get("grid_direction", "NEUTRAL"), # Asumir default por ahora
+        "rebalance_distance": params.get("rebalance_distance", 0.0),
+        "inventory_limit": params.get("inventory_limit", 0),
+        "max_orders": params.get("max_orders", 0),
+        "grid_direction": params.get("grid_direction", "NEUTRAL"),
     }
 
     backtest_metrics = {
@@ -184,9 +205,9 @@ def _normalizar_resultado_backtest(
         "ProfitFactor": res.get("profit_factor", 0.0),
         "WinRate": res.get("win_rate", 0.0),
         "Trades": res.get("operaciones", 0),
-        "Expectancy": params.get("expectancy", 0.0), # Asumir default por ahora
-        "Sharpe": params.get("sharpe", 0.0), # Asumir default por ahora
-        "Calmar": params.get("calmar", 0.0), # Asumir default por ahora
+        "Expectancy": params.get("expectancy", 0.0),
+        "Sharpe": params.get("sharpe", 0.0),
+        "Calmar": params.get("calmar", 0.0),
     }
 
     analysis_metrics = {
@@ -289,12 +310,12 @@ def _backtest_configuracion(
                 "  [BT-WIN-%s] %-15s PnL=$%6.2f | Modo:%-7s | Lev:%2dx | Lineas:%2d | Dist:%.3f%% | Ops:%3d | Ventana:24h",
                 source,
                 symbol,
-                resultado["pnl_neto"],
-                resultado["modo_optimo"],
-                resultado["apalancamiento_usado"],
-                resultado["num_grids"],
-                resultado["espaciado_pct"] * 100,
-                resultado["operaciones"],
+                resultado.backtest.get("PnL", 0),
+                resultado.optimization.get("preferred_mode", "?"),
+                resultado.optimization.get("leverage", 0),
+                resultado.optimization.get("grid_lines", 0),
+                resultado.optimization.get("grid_spacing_pct", 0) * 100,
+                resultado.backtest.get("Trades", 0),
             )
         return resultado
     except Exception as e:
@@ -348,7 +369,7 @@ def _backtest_con_optimizador(
         )
 
 # ==========================================
-# 2. ORQUESTADOR DE BACKTEST (Fuerza Bruta Múltiple)
+# 2. ORQUESTADOR DE BACKTEST (Fuerza Bruta Multiple)
 # ==========================================
 def _backtest_grid_simbolo(
     exchange: Any,
@@ -376,7 +397,7 @@ def _backtest_grid_simbolo(
 
 def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital: float, leverage: float = None, ia_overrides: Dict[str, Any] = None, slippage_pct: float = 0.0) -> List[ValidatedOptimizationProfile]:
     resultados = []
-    
+
     # Hilos en paralelo para no bloquear el bot
     with ThreadPoolExecutor(max_workers=5) as executor:
         futs = {
@@ -392,9 +413,8 @@ def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital
         for fut in as_completed(futs):
             res = fut.result()
             if res.backtest.get("PnL", -999.0) != -999.0:
-                # res.metadata["timeframe"] = "5m" # No es necesario, ya está en analysis
                 resultados.append(res)
-                
+
     # Ordena de mayor ganancia a menor ganancia
     resultados.sort(key=lambda x: x.backtest.get("PnL", -999.0), reverse=True)
     return resultados

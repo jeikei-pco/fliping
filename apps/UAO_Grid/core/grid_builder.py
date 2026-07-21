@@ -18,12 +18,49 @@ class GridBuilder:
         preferred_mode = str(optimization["preferred_mode"]).upper()
         rebalance_distance = float(optimization["rebalance_distance"])
 
+        # [FASE 3b] Filtros de seguridad: rechazar variables destructivas de la IA
+        MAX_LEVERAGE = 50.0
+        MIN_LEVERAGE = 1.0
+        MAX_SPACING_PCT = 0.4   # 20%
+        MIN_SPACING_PCT = 0.0001 # 0.01%
+        MIN_CAPITAL = 1.0
+        MIN_GRID_LINES = 4
+
+        if leverage > MAX_LEVERAGE:
+            logger.warning(
+                f"[GridBuilder] ⚠️ Apalancamiento {leverage}x excede el maximo ({MAX_LEVERAGE}x). Limitando."
+            )
+            leverage = MAX_LEVERAGE
+        if leverage < MIN_LEVERAGE:
+            logger.warning(f"[GridBuilder] ⚠️ Apalancamiento {leverage}x es menor al minimo. Ajustando a {MIN_LEVERAGE}x.")
+            leverage = MIN_LEVERAGE
+
+        if grid_spacing_pct > MAX_SPACING_PCT:
+            logger.warning(
+                f"[GridBuilder] ⚠️ Espaciado {grid_spacing_pct*100:.2f}% excede el maximo ({MAX_SPACING_PCT*100:.0f}%). Limitando."
+            )
+            grid_spacing_pct = MAX_SPACING_PCT
+        if grid_spacing_pct < MIN_SPACING_PCT:
+            logger.warning(
+                f"[GridBuilder] ⚠️ Espaciado {grid_spacing_pct*100:.4f}% es demasiado pequeno. Ajustando a {MIN_SPACING_PCT*100:.2f}%."
+            )
+            grid_spacing_pct = MIN_SPACING_PCT
+
+        if capital < MIN_CAPITAL:
+            logger.warning(f"[GridBuilder] ⚠️ Capital ${capital:.2f} es demasiado bajo. Ajustando a ${MIN_CAPITAL:.2f}.")
+            capital = MIN_CAPITAL
+
+        if grid_lines < MIN_GRID_LINES:
+            logger.warning(f"[GridBuilder] ⚠️ grid_lines={grid_lines} es demasiado bajo. Ajustando a {MIN_GRID_LINES}.")
+            grid_lines = MIN_GRID_LINES
+
         if current_price <= 0:
             raise ValueError("current_price debe ser mayor a cero")
         if grid_spacing_pct <= 0:
             raise ValueError("grid_spacing_pct debe ser mayor a cero")
         if grid_lines <= 0:
             raise ValueError("grid_lines debe ser mayor a cero")
+
 
         # Calcular cantidad por nivel (asumiendo distribución equitativa del capital)
         # Esto es una simplificación, el cálculo real podría ser más complejo

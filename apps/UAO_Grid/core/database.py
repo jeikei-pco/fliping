@@ -27,6 +27,10 @@ class Database:
         """Retorna una nueva conexión SQLite. IMPORTANTE: No compartir entre hilos."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # [FASE 1c] WAL mode: permite lecturas y escrituras simultáneas sin
+        # bloquear el bot. busy_timeout evita excepciones "database is locked".
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         try:
             yield conn
         finally:
@@ -93,6 +97,16 @@ class Database:
                         executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
+
+                # Tabla Blacklist
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS blacklist (
+                        symbol TEXT PRIMARY KEY,
+                        reason TEXT,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
 
                 # Tabla Estado del Grid (para recuperar la malla)
                 cursor.execute('''

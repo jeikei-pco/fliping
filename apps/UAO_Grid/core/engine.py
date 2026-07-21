@@ -350,9 +350,42 @@ class GridEngine:
 
 
     def _desplazar_grid(self, nuevo_centro: float):
-        """Re-inicializa la malla centrada en el nuevo precio."""
-        if self.optimization_profile:
-            self.inicializar_grid(self.optimization_profile, nuevo_centro)
+        """
+        Re-inicializa la malla centrada en el nuevo precio.
+        [FASE 1] TPs Inamovibles: extrae y protege los TPs activos ANTES de
+        regenerar las órdenes base, luego los fusiona evitando solapamientos.
+        """
+        if not self.optimization_profile:
+            return
+
+        # 1. Extraer todos los niveles TP vigentes (abs(level) >= 100)
+        tps_protegidos = [n for n in self.niveles if abs(int(n.get("level", 0) or 0)) >= 100]
+        logger.info(
+            f"[DESLIZAR] Protegiendo {len(tps_protegidos)} TPs inamovibles antes de re-centrar la malla."
+        )
+
+        # 2. Regenerar solo las órdenes base
+        self.inicializar_grid(self.optimization_profile, nuevo_centro)
+
+        # 3. Fusionar TPs protegidos evitando solapamientos con nuevos niveles base
+        nuevos_precios = {n["price"] for n in self.niveles}
+        tps_reinsertados = 0
+        for tp in tps_protegidos:
+            tp_precio = tp.get("price", 0.0)
+            # Revisar que no haya un nivel base ya en ese mismo precio exacto
+            demasiado_cerca = any(
+                self._distancia_pct(tp_precio, p) < (self.espaciado_actual * 0.50)
+                for p in nuevos_precios
+            )
+            if not demasiado_cerca:
+                self.niveles.append(tp)
+                nuevos_precios.add(tp_precio)
+                tps_reinsertados += 1
+
+        logger.info(
+            f"[DESLIZAR] Malla re-centrada en {nuevo_centro:.4f}. "
+            f"TPs reinsertados: {tps_reinsertados}/{len(tps_protegidos)}."
+        )
 
     # ── ESTADO Y ORDENES ──
 
@@ -458,6 +491,8 @@ class GridEngine:
             self.precio_promedio = 0.0
 
         # ELIMINAR EL NIVEL EJECUTADO MEDIANTE LEVEL ID EXACTO
+        # [FASE 1b] Usamos reconstrucción limpia de lista en lugar de .pop()
+        # dentro de un contexto concurrente para evitar errores de indexación.
         nivel_match = None
         for i, n in enumerate(self.niveles):
             # Prioridad 1: Búsqueda infalible por Level ID
@@ -468,12 +503,13 @@ class GridEngine:
             elif n["side"] == side and abs(n["price"] - price) < (price * 0.001):
                 nivel_match = i
                 break
-        
+
         if nivel_match is not None:
             n_ejecutado = self.niveles[nivel_match]
             cantidad_fill = min(qty, float(n_ejecutado.get("qty", qty)))
             cantidad_restante = max(0.0, float(n_ejecutado.get("qty", qty)) - cantidad_fill)
-            self.niveles.pop(nivel_match)
+            # Reconstrucción limpia: NO se usa pop() con índice mutable
+            self.niveles = [n for idx, n in enumerate(self.niveles) if idx != nivel_match]
             if cantidad_restante > 1e-9 and abs(int(n_ejecutado.get("level", 0) or 0)) >= 100:
                 residual = dict(n_ejecutado)
                 residual["qty"] = cantidad_restante

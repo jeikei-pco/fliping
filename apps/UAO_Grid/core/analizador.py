@@ -9,13 +9,13 @@ import pandas as pd
 
 logger = logging.getLogger("UAO_Scalping.GridAnalizador")
 
-WINDOW_24H_MS = 24 * 60 * 60 * 1000
+WINDOW_10H_MS = 10 * 60 * 60 * 1000
 FIVE_MINUTES_MS = 5 * 60 * 1000
-ONE_SECOND_MS = 1000
-FIVE_MIN_24H_LIMIT = 24 * 60 // 5
-ONE_SEC_24H_LIMIT = 24 * 60 * 60
+ONE_MINUTE_MS = 60 * 1000
+FIVE_MIN_10H_LIMIT = 10 * 60 // 5
+ONE_MIN_10H_LIMIT = 10 * 60
 MAX_5M_STALENESS_MS = 10 * 60 * 1000
-MAX_1S_STALENESS_MS = 5 * 60 * 1000
+MAX_1M_STALENESS_MS = 5 * 60 * 1000
 
 
 @dataclass
@@ -340,14 +340,14 @@ def _construir_analysis_profile(
 
 
 def _fetch_5m(exchange: Any, symbol: str, limit: int) -> pd.DataFrame:
-    """Obtiene velas de 5 minutos para las últimas 24 horas."""
-    limit_24h = FIVE_MIN_24H_LIMIT
-    since = int(time.time() * 1000) - WINDOW_24H_MS
-    velas = _fetch_ohlcv_window(exchange, symbol, "5m", since, limit_24h, FIVE_MINUTES_MS)
+    """Obtiene velas de 5 minutos para las últimas 10 horas."""
+    limit_10h = FIVE_MIN_10H_LIMIT
+    since = int(time.time() * 1000) - WINDOW_10H_MS
+    velas = _fetch_ohlcv_window(exchange, symbol, "5m", since, limit_10h, FIVE_MINUTES_MS)
     velas = _filtrar_ventana_fresca(velas, since, MAX_5M_STALENESS_MS)
-    if not velas or len(velas) < limit_24h // 2:
+    if not velas or len(velas) < limit_10h // 2:
         return pd.DataFrame()
-    return pd.DataFrame(velas[-limit_24h:], columns=["ts", "open", "high", "low", "close", "volume"])
+    return pd.DataFrame(velas[-limit_10h:], columns=["ts", "open", "high", "low", "close", "volume"])
 
 
 def _fetch_ohlcv_window(exchange: Any, symbol: str, timeframe: str, since: int, limit: int, step_ms: int) -> list:
@@ -401,12 +401,12 @@ def _filtrar_ventana_fresca(rows: list, since: int, max_staleness_ms: int) -> li
     return filtered
 
 
-def _fetch_1s(exchange: Any, symbol: str, limit: int = ONE_SEC_24H_LIMIT) -> pd.DataFrame:
-    """Obtiene velas de 1 segundo para el cálculo de recorrido interno de las últimas 24 horas."""
-    since = int(time.time() * 1000) - WINDOW_24H_MS
-    velas = _fetch_ohlcv_window(exchange, symbol, "1s", since, ONE_SEC_24H_LIMIT, ONE_SECOND_MS)
-    velas = _filtrar_ventana_fresca(velas, since, MAX_1S_STALENESS_MS)
-    if not velas or len(velas) < FIVE_MIN_24H_LIMIT:
+def _fetch_1m(exchange: Any, symbol: str, limit: int = ONE_MIN_10H_LIMIT) -> pd.DataFrame:
+    """Obtiene velas de 1 minuto para el cálculo de recorrido interno de las últimas 10 horas."""
+    since = int(time.time() * 1000) - WINDOW_10H_MS
+    velas = _fetch_ohlcv_window(exchange, symbol, "1m", since, ONE_MIN_10H_LIMIT, ONE_MINUTE_MS)
+    velas = _filtrar_ventana_fresca(velas, since, MAX_1M_STALENESS_MS)
+    if not velas or len(velas) < FIVE_MIN_10H_LIMIT:
         return pd.DataFrame()
     return pd.DataFrame(velas, columns=["ts", "open", "high", "low", "close", "volume"])
 
@@ -419,11 +419,11 @@ def _alinear_velas(df5: pd.DataFrame, rec: pd.Series) -> pd.DataFrame:
     return df5_aligned
 
 
-def _calcular_recorrido_real(df1s: pd.DataFrame) -> pd.Series:
-    """Calcula el recorrido absoluto interno dentro de cada bloque de 5 minutos usando velas de 1s."""
-    df = df1s.copy()
-    # Agrupamos en bloques de 300 velas (1s * 300 = 5m).
-    df["grupo"] = np.arange(len(df)) // 300
+def _calcular_recorrido_real(df1m: pd.DataFrame) -> pd.Series:
+    """Calcula el recorrido absoluto interno dentro de cada bloque de 5 minutos usando velas de 1m."""
+    df = df1m.copy()
+    # Agrupamos en bloques de 5 velas (1m * 5 = 5m).
+    df["grupo"] = np.arange(len(df)) // 5
     vals = []
     
     for _, g in df.groupby("grupo"):
@@ -541,7 +541,7 @@ def _calcular_score(ops, pct_util, consistencia, sim, osc, deriva, rango_vela_me
 
 
 
-def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None, timeframe: str = "5m", limit: int = FIVE_MIN_24H_LIMIT) -> Optional[Dict[str, Any]]:
+def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None, timeframe: str = "5m", limit: int = FIVE_MIN_10H_LIMIT) -> Optional[Dict[str, Any]]:
     """Función orquestadora que analiza un símbolo aplicando todos los cálculos modulares."""
     try:
         market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
@@ -556,7 +556,7 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         
         # 1. Extracción de datos
         df5 = _fetch_5m(exchange, symbol, limit)
-        df1 = _fetch_1s(exchange, symbol)
+        df1 = _fetch_1m(exchange, symbol)
         
         if df5.empty or df1.empty:
             return None
@@ -670,7 +670,7 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         flattened["analysis_profile"] = analysis_profile
         flattened["analysis"] = analysis_profile
         flattened["df_5m"] = df5
-        flattened["df_1s"] = df1
+        flattened["df_1m"] = df1
 
         return flattened
     
@@ -679,7 +679,7 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         return None
 
 
-def analizar_lote(exchange: Any, simbolos: List[str], tickers_info: dict = None, timeframe: str = "5m", limit: int = FIVE_MIN_24H_LIMIT, workers: int = 10, delay: float = 0) -> pd.DataFrame:
+def analizar_lote(exchange: Any, simbolos: List[str], tickers_info: dict = None, timeframe: str = "5m", limit: int = FIVE_MIN_10H_LIMIT, workers: int = 10, delay: float = 0) -> pd.DataFrame:
     """Analiza múltiples símbolos en paralelo y retorna un DataFrame clasificado."""
     res = []
     with ThreadPoolExecutor(max_workers=workers) as ex:

@@ -298,28 +298,28 @@ class GridOrquestador:
             logger.error("Error procesando fill WS privado: %s", exc, exc_info=True)
 
     def _ejecutar_reconciliacion_inmediata(self, symbol: str):
+        """Reconcilia las ordenes de un simbolo con el engine. Protegido por _engine_lock."""
         try:
             engine = self.engines.get(symbol)
             if not engine: return
-            
-            # Obtenemos el precio actual del engine o un ticker rápido
-            ticker = self.exchange.fetch_ticker(symbol)
-            precio_actual = float(ticker['last'])
-            market_info = self.exchange.markets.get(symbol, {})
-            
-            # Obtener lo que el engine quiere que exista
-            deseadas = engine.obtener_ordenes_deseadas(precio_actual, market_info)
-            
-            # Obtener lo que hay realmente
-            actuales = self.provider.get_open_orders(symbol)
-            
-            # Reconciliar (esto usa tu lógica existente de CCXT)
-            self.provider.reconciliar_ordenes(deseadas, actuales)
-            engine.malla_modificada = False # Resetear flag
-            logger.info(f"✅ Reconciliación inmediata exitosa para {symbol}")
-            
+
+            # Proteger con el mismo lock que usa _loop_operativo para evitar
+            # doble reconciliacion concurrente (Bug 2 corregido)
+            with self._engine_lock:
+                ticker = self.exchange.fetch_ticker(symbol)
+                precio_actual = float(ticker['last'])
+                market_info = self.exchange.markets.get(symbol, {})
+
+                deseadas = engine.obtener_ordenes_deseadas(precio_actual, market_info)
+                actuales = self.provider.get_open_orders(symbol)
+                self.provider.reconciliar_ordenes(deseadas, actuales)
+                engine.malla_modificada = False
+
+            logger.info(f"✅ Reconciliacion inmediata exitosa para {symbol}")
+
         except Exception as e:
-            logger.error(f"❌ Error en reconciliación inmediata: {e}")
+            logger.error(f"❌ Error en reconciliacion inmediata: {e}")
+
 
     def _webhook_worker(self):
         """Worker dedicado para enviar webhooks sin crear hilos por tick."""
@@ -588,38 +588,44 @@ class GridOrquestador:
                 symbol, len(engine.grid_cycles), len(engine.blocked_levels),
             )
         
-        # --- NUEVO: APLICAR EL APALANCAMIENTO DINÁMICO E INICIAR SESIÓN ML ---
-        leverage_optimo = engine.leverage # Fallback por defecto
+        leverage_optimo = engine.leverage  # fallback si no hay profile
         if hasattr(self, 'mejores_params') and symbol in self.mejores_params:
-            params_symbol = self.mejores_params[symbol]
-            leverage_optimo = params_symbol.get("apalancamiento", engine.leverage)
-            engine.leverage = leverage_optimo # Actualizar el engine
-            engine.num_grids_optimo = params_symbol.get("num_grids", 6)
-            engine.espaciado_optimo = params_symbol.get("espaciado_pct")
-            engine.modo_estrategia = str(params_symbol.get("modo", "NEUTRAL")).upper()
-            if params_symbol.get("capital_por_linea") and params_symbol.get("num_grids"):
-                engine.capital_inicial = float(params_symbol["capital_por_linea"]) * int(params_symbol["num_grids"])
-            
-            # Iniciar sesión de aprendizaje para ML
+
+            profile = self.mejores_params[symbol]
+            # mejores_params almacena ValidatedOptimizationProfile — accedemos por atributos
+            opt = profile.optimization if hasattr(profile, 'optimization') else {}
+            leverage_optimo = float(opt.get("leverage", engine.leverage))
+            engine.leverage = leverage_optimo
+            engine.num_grids_optimo = int(opt.get("grid_lines", 6))
+            engine.espaciado_optimo = float(opt.get("grid_spacing_pct") or engine.espaciado_actual or 0.0)
+            engine.modo_estrategia = str(opt.get("preferred_mode", "NEUTRAL")).upper()
+            capital_total = float(opt.get("capital", engine.capital_inicial))
+            if engine.num_grids_optimo > 0:
+                engine.capital_inicial = capital_total
+
+            # Iniciar sesion de aprendizaje para ML
+            meta = profile.metadata if hasattr(profile, 'metadata') else {}
+            bt   = profile.backtest  if hasattr(profile, 'backtest')  else {}
             session_id = f"{symbol}_{int(time.time())}"
             self.db.create_ml_session(
                 session_id=session_id,
                 symbol=symbol,
-                analyzer_metrics=params_symbol.get("analisis_original", {}),
-                math_params=params_symbol.get("params_optimos", {}),
-                ai_factors=params_symbol.get("ai_overrides", {}),
-                final_params=params_symbol.get("params_optimos", {}),
+                analyzer_metrics=meta.get("ai_overrides", {}),
+                math_params=opt,
+                ai_factors=meta.get("ai_overrides", {}),
+                final_params=opt,
                 backtest_metrics={
-                    "pnl_neto": params_symbol.get("pnl_neto", 0.0),
-                    "roi_pct": params_symbol.get("roi_pct", 0.0),
-                    "drawdown": params_symbol.get("drawdown", 0.0),
-                    "win_rate": params_symbol.get("win_rate", 0.0),
-                    "profit_factor": params_symbol.get("profit_factor", 0.0),
-                    "operaciones": params_symbol.get("operaciones", 0),
+                    "pnl_neto":      bt.get("PnL", 0.0),
+                    "roi_pct":       bt.get("ROI", 0.0),
+                    "drawdown":      bt.get("Drawdown", 0.0),
+                    "win_rate":      bt.get("WinRate", 0.0),
+                    "profit_factor": bt.get("ProfitFactor", 0.0),
+                    "operaciones":   bt.get("Trades", 0),
                 },
-                setup_source=params_symbol.get("source", "UNKNOWN"),
+                setup_source=meta.get("source", "UNKNOWN"),
             )
-            logger.info(f"🧠 [ML] Nueva sesión de aprendizaje registrada para {symbol} (ID: {session_id})")
+            logger.info(f"🧠 [ML] Nueva sesion de aprendizaje registrada para {symbol} (ID: {session_id})")
+
             
         # Ajustar apalancamiento en OKX antes de operar
         if hasattr(self.provider, "set_leverage"):
@@ -769,21 +775,26 @@ class GridOrquestador:
                             try:
                                 actuales = self.provider.get_open_orders(symbol)
                                 time_15m_ago_ms = (now_sec - 900) * 1000
-                                # Verificar si existen órdenes creadas hace 15 min o más
-                                ordenes_viejas = [o for o in actuales if o.get('timestamp') and o['timestamp'] <= time_15m_ago_ms]
-                                
+                                # [Bug 3 fix] get_open_orders retorna objetos Order, no dicts
+                                ordenes_viejas = [
+                                    o for o in actuales
+                                    if getattr(o, 'timestamp', None) and o.timestamp <= time_15m_ago_ms
+                                ]
+
                                 if ordenes_viejas:
-                                    logger.warning(f"🧹 [ESTANCAMIENTO] {symbol} lleva 15 min sin ejecutar y con órdenes viejas. Cancelando y cerrando grid.")
+                                    logger.warning(f"🧹 [ESTANCAMIENTO] {symbol} lleva 15 min sin ejecutar y con ordenes viejas. Cancelando y cerrando grid.")
                                     try:
                                         self.exchange.cancel_all_orders(symbol)
                                     except Exception as e:
-                                        logger.error(f"Error cancelando órdenes de {symbol}: {e}")
+                                        logger.error(f"Error cancelando ordenes de {symbol}: {e}")
                                     engine.reset()
                                     engine.kill_switch_activado = True
                                     self.wakeup_event.set()
                                     break
+
                             except Exception as e:
                                 logger.error(f"Error verificando estancamiento en {symbol}: {e}")
+
                     
                     # Respirar si pasaron 3 velas sin operaciones (modificado: ya no forzamos por posición cerrada)
                     condicion_respiracion = (now_sec - last_trade_time >= tres_velas_sec)
@@ -1006,6 +1017,16 @@ class GridOrquestador:
         
         if not simbolos_operables:
             logger.warning("  No hay símbolos que cumplan con el volumen mínimo.")
+            return []
+
+        # 0.5 Filtrar la lista negra
+        blacklisted = self.db.get_blacklisted_symbols()
+        if blacklisted:
+            simbolos_operables = [s for s in simbolos_operables if s not in blacklisted]
+            logger.info(f"  Omitiendo {len(blacklisted)} símbolos en la lista negra.")
+
+        if not simbolos_operables:
+            logger.warning("  Todos los símbolos operables están en la lista negra.")
             return []
 
         # 1. Analizador filtra los símbolos

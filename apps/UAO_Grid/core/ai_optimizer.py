@@ -1,21 +1,77 @@
-"""
-ai_optimizer.py — Worker Daemon para optimización IA.
-Consulta a Claude periódicamente y guarda los overrides en SQLite.
-"""
 import json
 import logging
 import os
-import urllib.request
-import urllib.error
 import re
 import time
 import threading
-from typing import Dict, Any
+import urllib.request
+import urllib.error
+from typing import Dict, Any, List, Optional
 
 from core.database import Database
 from core.adapters.ai_provider_factory import get_api_providers
 
 logger = logging.getLogger("UAO_Sclaping.AIOptimizer")
+
+
+def _extraer_json_robusto(texto: str) -> Optional[Dict]:
+    """
+    [FASE 3a] Parser JSON robusto con expresiones regulares.
+    Tolera respuestas malformadas del LLM: markdown fences, texto extra, llaves
+    incompletas, etc. Devuelve el primer objeto JSON dict valido encontrado o None.
+    """
+    if not texto:
+        return None
+
+    # 1. Limpiar bloques markdown (```json ... ``` o ``` ... ```)
+    texto_limpio = re.sub(r"```(?:json)?\s*", "", texto).replace("```", "").strip()
+
+    # 2. Intentar extraccion con regex: busca el bloque mas grande de { ... }
+    #    usando un patron greedy de apertura a cierre, con anidamiento controlado.
+    candidatos: List[str] = []
+    profundidad = 0
+    inicio = -1
+    for i, c in enumerate(texto_limpio):
+        if c == "{":
+            if profundidad == 0:
+                inicio = i
+            profundidad += 1
+        elif c == "}":
+            profundidad -= 1
+            if profundidad == 0 and inicio != -1:
+                candidatos.append(texto_limpio[inicio : i + 1])
+                inicio = -1
+
+    # Ordenamos por longitud descendente para intentar el JSON mas completo primero
+    candidatos.sort(key=len, reverse=True)
+
+    for candidato in candidatos:
+        try:
+            parsed = json.loads(candidato)
+            if isinstance(parsed, dict) and len(parsed) > 0:
+                return parsed
+        except json.JSONDecodeError:
+            # Intentar reparar comillas simples o trailing commas comunes
+            try:
+                reparado = re.sub(r",\s*([}\]])", r"\1", candidato)
+                parsed = json.loads(reparado)
+                if isinstance(parsed, dict) and len(parsed) > 0:
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+    # 3. Fallback: intentar parsear el texto limpio directamente
+    try:
+        parsed = json.loads(texto_limpio)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    return None
+
+
+
 
 
 def _perfil_analisis(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,31 +232,8 @@ Ejemplo:
             logger.warning("  Todos los proveedores de IA fallaron. Usando OptimizadorGrid (Matemático) como respaldo.")
             return
 
-        def extraer_jsons(texto: str):
-            candidatos = []
-            depth = 0
-            inicio = -1
-            for i, c in enumerate(texto):
-                if c == '{':
-                    if depth == 0:
-                        inicio = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0 and inicio != -1:
-                        candidatos.append(texto[inicio:i+1])
-                        inicio = -1
-            return candidatos
-
-        parsed_data = None
-        for candidato in extraer_jsons(content):
-            try:
-                parsed = json.loads(candidato)
-                if isinstance(parsed, dict) and len(parsed) > 0:
-                    parsed_data = parsed
-                    break
-            except json.JSONDecodeError:
-                continue
+        # [FASE 3a] Usar parser robusto centralizado en lugar de conteo manual de llaves
+        parsed_data = _extraer_json_robusto(content)
 
         if parsed_data:
             def clamp(val, min_val, max_val):
@@ -216,69 +249,15 @@ Ejemplo:
                         params["LEVERAGE_FACTOR"] = clamp(float(params["LEVERAGE_FACTOR"]), 0.8, 1.15)
                     if "CAPITAL_FACTOR" in params:
                         params["CAPITAL_FACTOR"] = clamp(float(params["CAPITAL_FACTOR"]), 0.7, 1.3)
-                    
-                    logger.info(f"  IA sugiere overrides específicos para {symbol}: {params}")
-                    # Guarda de forma persistente utilizando el método por símbolo en DB
+
+                    logger.info(f"  IA sugiere overrides especificos para {symbol}: {params}")
                     if hasattr(self.db, "update_symbol_config_overrides"):
                         self.db.update_symbol_config_overrides(symbol, params)
                     else:
-                        # Fallback a global si la base de datos aún no tiene implementado el método por símbolo
                         self.db.update_config_overrides(params)
         else:
-            logger.warning(f"  IA no devolvió JSON válido estructurado por símbolos. Contenido recibido: {content[:200]}")            
+            logger.warning(f"  IA no devolvio JSON valido estructurado por simbolos. Contenido recibido: {content[:200]}")
 
-        # ── Extracción robusta de JSON ────────────────────────────────────
-        def extraer_jsons(texto: str):
-            """Extrae todos los candidatos JSON usando conteo de llaves."""
-            candidatos = []
-            depth = 0
-            inicio = -1
-            for i, c in enumerate(texto):
-                if c == '{':
-                    if depth == 0:
-                        inicio = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0 and inicio != -1:
-                        candidatos.append(texto[inicio:i+1])
-                        inicio = -1
-            return candidatos
-
-        CLAVES_VALIDAS = {
-            "GRID_STEP_PCT", "GRID_DENSITY_FACTOR", "LEVERAGE_FACTOR", "CAPITAL_FACTOR",
-            "MAX_LEVERAGE", "MIN_SCORE", "MIN_CONSISTENCY", "MIN_OSCILLATION"
-        }
-
-        params = None
-        for candidato in extraer_jsons(content):
-            try:
-                parsed = json.loads(candidato)
-                if any(k in parsed for k in CLAVES_VALIDAS):
-                    params = {k: v for k, v in parsed.items() if k in CLAVES_VALIDAS}
-                    break
-            except json.JSONDecodeError:
-                continue
-
-        if params:
-            # Clamping de seguridad
-            def clamp(val, min_val, max_val):
-                return max(min_val, min(float(val), max_val))
-                
-            if "GRID_STEP_PCT" in params:
-                # Limitamos el porcentaje absoluto a un rango sensato: 0.15% a 5%
-                params["GRID_STEP_PCT"] = clamp(float(params["GRID_STEP_PCT"]), 0.15, 5.0)
-            if "GRID_DENSITY_FACTOR" in params:
-                params["GRID_DENSITY_FACTOR"] = clamp(float(params["GRID_DENSITY_FACTOR"]), 0.75, 1.25)
-            if "LEVERAGE_FACTOR" in params:
-                params["LEVERAGE_FACTOR"] = clamp(float(params["LEVERAGE_FACTOR"]), 0.8, 1.15)
-            if "CAPITAL_FACTOR" in params:
-                params["CAPITAL_FACTOR"] = clamp(float(params["CAPITAL_FACTOR"]), 0.7, 1.3)
-                
-            logger.info(f"🤖 IA sugiere overrides (limitados): {params}")
-            self.db.update_config_overrides(params)
-        else:
-            logger.warning(f"⚠️ IA no devolvió JSON válido con claves conocidas. Contenido recibido: {content[:200]}")
 
     def optimizar_lote_top3(self, top_3_symbols_data: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """
@@ -340,31 +319,14 @@ IMPORTANTE: Responde ÚNICAMENTE con un objeto JSON válido que contenga todos l
                 break
 
         if not success:
-            logger.warning("Todos los proveedores de IA fallaron para la optimización del lote Top 3.")
+            logger.warning("Todos los proveedores de IA fallaron para la optimizacion del lote Top 3.")
             return {}
 
-        def extraer_jsons(texto: str):
-            candidatos = []
-            depth = 0
-            inicio = -1
-            for i, c in enumerate(texto):
-                if c == '{':
-                    if depth == 0:
-                        inicio = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0 and inicio != -1:
-                        candidatos.append(texto[inicio:i+1])
-                        inicio = -1
-            return candidatos
+        # [FASE 3a] Usar parser robusto centralizado
+        parsed = _extraer_json_robusto(content)
+        if isinstance(parsed, dict) and len(parsed) > 0:
+            return parsed
 
-        for candidato in extraer_jsons(content):
-            try:
-                parsed = json.loads(candidato)
-                if isinstance(parsed, dict) and len(parsed) > 0:
-                    return parsed
-            except json.JSONDecodeError:
-                continue
-
+        logger.warning("optimizar_lote_top3: IA no devolvio JSON valido. Contenido recibido: %s", content[:200])
         return {}
+
