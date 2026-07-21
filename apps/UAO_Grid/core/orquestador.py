@@ -957,16 +957,16 @@ class GridOrquestador:
             return []
 
         # Seleccionar los mejores después de que todos pasaron por optimizador + backtest.
-        top_3_iniciales = resultados_backtest[:self.top_n]
+        ranking_inicial = resultados_backtest[:self.top_n]
         
         resultados_finales = []
         
         # 4. Enviar a AI_Optimizer el Top ya rankeado en un solo JSON (lote)
-        if self.ai_worker and top_3_iniciales:
-            logger.info("  [4/6] Enviando el lote Top %d al AI Optimizer...", len(top_3_iniciales))
-            ai_suggestions = self.ai_worker.optimizar_lote_top3(top_3_iniciales)
+        if self.ai_worker and ranking_inicial:
+            logger.info("  [4/6] Enviando el lote Top %d al AI Optimizer...", len(ranking_inicial))
+            ai_suggestions = self.ai_worker.optimizar_lote_top3(ranking_inicial)
             
-            for item in top_3_iniciales:
+            for item in ranking_inicial:
                 sym = item["symbol"]
                 overrides_simbolo = ai_suggestions.get(sym, {})
                 
@@ -1014,7 +1014,7 @@ class GridOrquestador:
                 else:
                     resultados_finales.append(item)
         else:
-            resultados_finales = top_3_iniciales
+            resultados_finales = ranking_inicial
 
         # Ordenar los resultados finales de mayor a menor PnL
         resultados_finales.sort(key=lambda x: x["pnl_neto"], reverse=True)

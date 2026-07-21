@@ -197,10 +197,10 @@ class GridOrquestador:
             for m in metricas_lista:
                 self.db.save_market_metrics(m.symbol, m.__dict__, m.score)
 
-            # 4. Descargar datos para backtest
-            top = metricas_lista[:self.config.scanner.backtest_top_n]
+            # 4. Descargar datos para backtest de todos los símbolos analizados.
+            candidatos = metricas_lista
             datos_backtest = []
-            for metrics in top:
+            for metrics in candidatos:
                 df = self.provider.fetch_ohlcv(metrics.symbol, timeframe="5m", limit=288)
                 if not df.empty:
                     datos_backtest.append((df, metrics))
@@ -219,7 +219,7 @@ class GridOrquestador:
                 cycle_count=self._ciclo_count,
             )
 
-            return resultados
+            return resultados[:self.config.scanner.backtest_top_n]
 
         except Exception as exc:
             logger.error("_analizar_y_backtestear error: %s", exc, exc_info=True)
