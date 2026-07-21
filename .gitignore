@@ -7,3 +7,4 @@ node_modules
 apps\python-workers\grid_worker\tests\.env
 .env
 apps\UAO_Grid\.env
+*/.env*.db
