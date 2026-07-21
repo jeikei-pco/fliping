@@ -439,6 +439,10 @@ class GridEngine:
             qty_contracts = n["qty"] / contract_sz if contract_sz > 0 else n["qty"]
             
             qty = self._redondear_qty(qty_contracts, lot_sz_contracts)
+            # Garantizar mínimo de 1 contrato si el monto calculado es menor pero mayor a 0
+            if qty < 1.0 and qty_contracts > 0:
+                qty = 1.0
+                
             if qty > 0:
                 oid = f"grid_{n['level']}_{precio}"
                 is_tp = abs(n['level']) >= 100

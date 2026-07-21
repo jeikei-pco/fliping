@@ -12,7 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jk_user -d jk_flipping"]
+      test: [ "CMD-SHELL", "pg_isready -U jk_user -d jk_flipping" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -24,7 +24,7 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -61,6 +61,27 @@ services:
       - ./apps/UAO_Grid/.env
     volumes:
       - ./apps/UAO_Grid:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  uao_grid_v2:
+    build:
+      context: ./apps/UAO_Grid_V2
+      dockerfile: Dockerfile
+    container_name: jk-flipping-uao-grid_v2
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      UAO_NAME: "UAO_Grid_V2"
+      UAO_RUNTIME: "docker-compose"
+      WEBHOOK_URL: "http://192.168.0.11:4000/api/webhook/grid"
+      PYTHONUNBUFFERED: "1"
+    env_file:
+      - ./apps/UAO_Grid/.env
+    volumes:
+      - ./apps/UAO_Grid_v2:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

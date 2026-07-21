@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# UAO Grid V2 — Dependencias de Python
+# ─────────────────────────────────────────────────────────────────────────────
+# Instalar con:
+#   pip install -r requirements.txt
+#
+# Para desarrollo + tests:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# ── Exchange ──────────────────────────────────────────────────────────────────
+ccxt>=4.2.0                  # OKX: OHLCV, órdenes, posiciones, batch API
+
+# ── Data Science ──────────────────────────────────────────────────────────────
+pandas>=2.0.0                # DataFrames OHLCV y resultados de análisis
+numpy>=1.26.0                # Cálculos vectorizados (ATR, equity curve, etc.)
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+websocket-client>=1.6.0      # WebSocket público OKX (tickers en tiempo real)
+cryptography>=41.0.0         # Firma HMAC para autenticación WS privado OKX
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+requests>=2.31.0             # Webhook al frontend, fallback REST del Watchdog
+
+# ── Configuración ─────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0         # Carga del archivo .env
+
+# ── IA Optimizer (providers en orden de prioridad) ────────────────────────────
+google-genai>=1.0.0          # Cliente Gemini nativo (provider #1)
+openai>=1.12.0               # Cliente OpenAI / OpenRouter / Groq (provider #2-4)
+                             # Claude proxy usa urllib.request (stdlib, sin dependencia)
+
+# ── Base de datos ─────────────────────────────────────────────────────────────
+# sqlite3 ya viene incluido en Python stdlib — sin dependencia adicional

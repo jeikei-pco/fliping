@@ -719,15 +719,21 @@ class GridOrquestador:
                     # =================================================
                     
                     if engine.malla_necesita_reajuste(precio_actual) and not engine.modo_drenaje:
-                        # Re-centramos la malla permitiendo que se desplace (slide) con el precio
-                        # y que respire (ajuste de espaciado_actual por ATR) incluso si hay inventario.
-                        logger.info(f"🎯 [GRID] Desplazamiento/Respiración activado en {symbol}. Re-centrando malla en {precio_actual:.4f}.")
-                        try:
-                            df_5m = self._fetch_velas(symbol)
-                            engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
-                        except Exception as e:
-                            logger.error(f"Error recargando ATR en {symbol}: {e}")
-                        engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
+                        if abs(engine.posicion_neta) > 1e-9:
+                            if engine.chequear_breakout_malla(precio_actual):
+                                logger.warning(f"🚨 [BREAKOUT] Precio fuera de límites en {symbol}. Recalculando Malla.")
+                                try:
+                                    df_5m = self._fetch_velas(symbol)
+                                    engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
+                                except Exception as e:
+                                    logger.error(f"Error recargando ATR tras breakout en {symbol}: {e}")
+                                engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
+                            # else: 
+                            # Si es solo un llenado intermedio, NO recalculamos. Mantenemos el TP estático.
+                        else:
+                            # Sin inventario, podemos centrar la malla libremente
+                            logger.info(f"🎯 [GRID] Posición plana en {symbol}, centrando malla nueva.")
+                            engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
                     
                     if engine.malla_modificada:
                         with self._engine_lock:
