@@ -140,6 +140,12 @@ class Database:
                         analyzer_metrics TEXT NOT NULL,
                         math_params TEXT NOT NULL,
                         ai_factors TEXT NOT NULL,
+                        final_params TEXT NOT NULL DEFAULT '{}',
+                        backtest_metrics TEXT NOT NULL DEFAULT '{}',
+                        setup_source TEXT NOT NULL DEFAULT 'UNKNOWN',
+                        grid_quality REAL DEFAULT 0.0,
+                        riesgo REAL DEFAULT 0.0,
+                        modo_preferido TEXT DEFAULT 'NEUTRAL',
                         pnl REAL DEFAULT 0.0,
                         win_rate REAL DEFAULT 0.0,
                         profit_factor REAL DEFAULT 0.0,
@@ -149,6 +155,14 @@ class Database:
                         gross_loss REAL DEFAULT 0.0
                     )
                 ''')
+                self._ensure_columns(cursor, "ml_history", {
+                    "final_params": "TEXT NOT NULL DEFAULT '{}'",
+                    "backtest_metrics": "TEXT NOT NULL DEFAULT '{}'",
+                    "setup_source": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+                    "grid_quality": "REAL DEFAULT 0.0",
+                    "riesgo": "REAL DEFAULT 0.0",
+                    "modo_preferido": "TEXT DEFAULT 'NEUTRAL'",
+                })
 
                 # Tabla Cache de Webhook del Grid (fallback offline)
                 cursor.execute('''
@@ -161,6 +175,22 @@ class Database:
 
                 conn.commit()
                 logger.info(f"📁 Base de datos inicializada en {self.db_path}")
+
+    def _ensure_columns(self, cursor: sqlite3.Cursor, table: str, columns: Dict[str, str]):
+        """Agrega columnas faltantes manteniendo compatibilidad con bases SQLite existentes."""
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row["name"] for row in cursor.fetchall()}
+        for column, ddl in columns.items():
+            if column in existing:
+                continue
+            try:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            except sqlite3.OperationalError:
+                pass
+
+    def _json_dumps(self, payload: Any) -> str:
+        """Serializa payloads con tipos no nativos como numpy/pandas sin romper SQLite."""
+        return json.dumps(payload or {}, default=str)
 
     # ── METODOS DE ESCRITURA BATCH / FLUSH ──
 
@@ -255,16 +285,97 @@ class Database:
                 ''', (trade_id, symbol, side, price, qty, pnl, fee, dt_str))
                 conn.commit()
 
-    def create_ml_session(self, session_id: str, symbol: str, analyzer_metrics: dict, math_params: dict, ai_factors: dict):
+    def create_ml_session(
+        self,
+        session_id: str,
+        symbol: str,
+        analyzer_metrics: dict,
+        math_params: dict,
+        ai_factors: dict,
+        final_params: Optional[dict] = None,
+        backtest_metrics: Optional[dict] = None,
+        setup_source: str = "UNKNOWN",
+    ):
         """Crea una sesión de ML para asociar un rendimiento empírico a un setup teórico."""
+        analyzer_metrics = analyzer_metrics or {}
+        final_params = final_params or {}
+        backtest_metrics = backtest_metrics or {}
+        grid_quality = float(analyzer_metrics.get("grid_quality", final_params.get("grid_quality", 0.0)) or 0.0)
+        riesgo = float(analyzer_metrics.get("riesgo", final_params.get("riesgo", 0.0)) or 0.0)
+        modo_preferido = str(analyzer_metrics.get("modo_preferido", final_params.get("modo", "NEUTRAL")) or "NEUTRAL")
+
         with self._lock:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO ml_history (session_id, symbol, analyzer_metrics, math_params, ai_factors)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (session_id, symbol, json.dumps(analyzer_metrics), json.dumps(math_params), json.dumps(ai_factors)))
+                    INSERT INTO ml_history (
+                        session_id, symbol, analyzer_metrics, math_params, ai_factors,
+                        final_params, backtest_metrics, setup_source,
+                        grid_quality, riesgo, modo_preferido
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    session_id,
+                    symbol,
+                    self._json_dumps(analyzer_metrics),
+                    self._json_dumps(math_params),
+                    self._json_dumps(ai_factors),
+                    self._json_dumps(final_params),
+                    self._json_dumps(backtest_metrics),
+                    setup_source,
+                    grid_quality,
+                    riesgo,
+                    modo_preferido,
+                ))
                 conn.commit()
+
+    def update_ml_session_backtest(self, symbol: str, final_params: dict, backtest_metrics: dict, setup_source: str = "UNKNOWN"):
+        """Actualiza la última sesión del símbolo con parámetros finales y métricas del backtest."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT session_id
+                    FROM ml_history
+                    WHERE symbol=?
+                    ORDER BY started_at DESC LIMIT 1
+                ''', (symbol,))
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                cursor.execute('''
+                    UPDATE ml_history
+                    SET final_params=?, backtest_metrics=?, setup_source=?
+                    WHERE session_id=?
+                ''', (
+                    self._json_dumps(final_params),
+                    self._json_dumps(backtest_metrics),
+                    setup_source,
+                    row["session_id"],
+                ))
+                conn.commit()
+                return True
+
+    def get_latest_ml_session(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Obtiene la última sesión ML del símbolo con JSON parseado para auditoría/IA."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT *
+                FROM ml_history
+                WHERE symbol=?
+                ORDER BY started_at DESC LIMIT 1
+            ''', (symbol,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            for key in ("analyzer_metrics", "math_params", "ai_factors", "final_params", "backtest_metrics"):
+                try:
+                    data[key] = json.loads(data.get(key) or "{}")
+                except Exception:
+                    data[key] = {}
+            return data
 
     def update_ml_session_trade(self, symbol: str, pnl: float):
         """Actualiza el PnL, Win Rate y Profit Factor de la última sesión activa del símbolo."""

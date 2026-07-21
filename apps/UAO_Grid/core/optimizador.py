@@ -12,22 +12,37 @@ class OptimizadorGrid:
 
     def optimizar_symbol(self, symbol: str, df: pd.DataFrame, capital_total: float, analisis: Dict[str, Any], modo: str = "NEUTRAL") -> Dict[str, Any]:
         """
-        Analiza las velas y devuelve la configuración completa de la malla y el riesgo.
+        Transforma el perfil del analizador en la configuracion final de la malla.
         """
         if df is None or df.empty or len(df) < 15:
             return {"symbol": symbol, "valido": False}
-            
+
         # Extraer filtros de la IA o defaults
         min_score = float(self.overrides.get("MIN_SCORE", 30))   # ↓ el filtro real es el PnL del backtest
 
         min_cons = float(self.overrides.get("MIN_CONSISTENCY", 0.0))
         min_osc = float(self.overrides.get("MIN_OSCILLATION", 0.0))
+        min_grid_quality = float(self.overrides.get("MIN_GRID_QUALITY", 0.0))
         
-        # Extraer overrides absolutos y factores
+        # Factores sugeridos por el analizador. Los defaults preservan compatibilidad
+        # con perfiles antiguos que aun no tengan las claves nuevas.
+        grid_quality = max(0.0, min(float(analisis.get("grid_quality", analisis.get("zigzag_score", 0.5))), 1.0))
+        riesgo = max(0.0, min(float(analisis.get("riesgo", 0.5)), 1.0))
+        densidad_analisis = max(0.75, min(float(analisis.get("densidad_sugerida", 1.0)), 1.25))
+        capital_analisis = max(0.70, min(float(analisis.get("capital_factor", 1.0)), 1.20))
+        leverage_analisis = max(0.75, min(float(analisis.get("apalancamiento_factor", 1.0)), 1.15))
+        modo_preferido = str(analisis.get("modo_preferido", "NEUTRAL")).upper()
+
+        # Extraer overrides de IA como multiplicadores finos.
         grid_step_pct_override = self.overrides.get("GRID_STEP_PCT")
+        grid_step_factor = max(0.80, min(float(self.overrides.get("GRID_STEP_FACTOR", 1.0)), 1.20))
         grid_density_factor = max(0.75, min(float(self.overrides.get("GRID_DENSITY_FACTOR", 1.0)), 1.25))
         leverage_factor = max(0.80, min(float(self.overrides.get("LEVERAGE_FACTOR", 1.0)), 1.15))
-        capital_factor = max(0.80, min(float(self.overrides.get("CAPITAL_FACTOR", 1.0)), 1.20))
+        capital_factor = max(0.70, min(float(self.overrides.get("CAPITAL_FACTOR", 1.0)), 1.30))
+
+        densidad_final = max(0.60, min(densidad_analisis * grid_density_factor, 1.45))
+        capital_factor_final = max(0.50, min(capital_analisis * capital_factor, 1.50))
+        leverage_factor_final = max(0.50, min(leverage_analisis * leverage_factor, 1.30))
         
         # Filtros duros — verificar uno a uno para diagnóstico exacto
         min_ops   = float(self.overrides.get("MIN_OPS", 0.1))
@@ -38,6 +53,7 @@ class OptimizadorGrid:
             ("score",           analisis.get("score",           0),   min_score),
             ("consistencia",    analisis.get("consistencia",    0),   min_cons),
             ("oscilacion",      analisis.get("oscilacion",      0),   min_osc),
+            ("grid_quality",     grid_quality,                         min_grid_quality),
         ]
         for campo, valor, minimo in checks:
             if valor < minimo:
@@ -53,21 +69,10 @@ class OptimizadorGrid:
         deriva_max_pct = analisis.get("deriva_pct", 1.5) / 100.0  # analizador lo devuelve en pct (ej. 1.5 para 1.5%)
         rango_vela_mediano = analisis.get("rango_vela_mediano", 0.001)
 
-        # 2. Apalancamiento Dinámico (Riesgo Compuesto)
-        # Peso base de volatilidad
-        riesgo_base = (deriva_max_pct * 0.4) + (atr_pct * 0.3)
-        
-        # Penalizadores de riesgo por falta de consistencia y score
-        consistencia = analisis.get("consistencia", 0.5)
-        score = max(analisis.get("score", 70), 1)
-        
-        penalidad_consistencia = 1 + ((1 - consistencia) * 0.2)
-        penalidad_score = 1 + ((100 / score) * 0.1)
-        
-        riesgo_liquidacion = riesgo_base * penalidad_consistencia * penalidad_score * self.mult_riesgo
-        
-        apalancamiento_calculado = math.floor((1.0 / (riesgo_liquidacion + 0.001)) * leverage_factor)
+        # 2. Apalancamiento dinamico desde el perfil del simbolo.
         limite_apalancamiento = int(self.overrides.get("MAX_LEVERAGE", self.max_leverage))
+        base_leverage_ratio = 0.35 + (grid_quality * 0.50) + ((1.0 - riesgo) * 0.15)
+        apalancamiento_calculado = math.floor(limite_apalancamiento * base_leverage_ratio * leverage_factor_final)
         apalancamiento = max(2, min(apalancamiento_calculado, limite_apalancamiento))
 
         # 3. Espaciado y Límites
@@ -76,26 +81,33 @@ class OptimizadorGrid:
             espaciado_pct = max(0.0012, min(float(grid_step_pct_override) / 100.0, 0.05))
         else:
             grid_step_optimo = analisis.get("grid_step_optimo", max(rango_vela_mediano * 0.8, 0.0012))
-            espaciado_pct = max(grid_step_optimo, 0.0012) # Mínimo 0.12% por comisiones
+            espaciado_pct = max(grid_step_optimo * grid_step_factor, 0.0012) # Mínimo 0.12% por comisiones
         
-        if modo.upper() == "NEUTRAL":
-            limite_sup = precio_actual * (1 + (deriva_max_pct / 2) * self.mult_riesgo)
-            limite_inf = precio_actual * (1 - (deriva_max_pct / 2) * self.mult_riesgo)
-        elif modo.upper() == "LONG":
-            limite_sup = precio_actual * (1 + (rango_vela_mediano * 3))
-            limite_inf = precio_actual * (1 - deriva_max_pct * self.mult_riesgo)
-        elif modo.upper() == "SHORT":
-            limite_sup = precio_actual * (1 + deriva_max_pct * self.mult_riesgo)
-            limite_inf = precio_actual * (1 - (rango_vela_mediano * 3))
+        modo_final = str(modo or modo_preferido).upper()
+        if modo_final == "NEUTRAL" and modo_preferido in {"LONG", "SHORT"}:
+            modo_final = modo_preferido
+
+        rango_operativo = max(deriva_max_pct * self.mult_riesgo, atr_pct * 6, espaciado_pct * 8)
+
+        if modo_final == "NEUTRAL":
+            limite_sup = precio_actual * (1 + rango_operativo / 2)
+            limite_inf = precio_actual * (1 - rango_operativo / 2)
+        elif modo_final == "LONG":
+            limite_sup = precio_actual * (1 + max(rango_vela_mediano * 3, espaciado_pct * 4))
+            limite_inf = precio_actual * (1 - rango_operativo)
+        elif modo_final == "SHORT":
+            limite_sup = precio_actual * (1 + rango_operativo)
+            limite_inf = precio_actual * (1 - max(rango_vela_mediano * 3, espaciado_pct * 4))
         else:
             limite_sup = precio_actual * 1.05
             limite_inf = precio_actual * 0.95
+            modo_final = "NEUTRAL"
 
         # 4. Densidad de Líneas e Inversión
         rango_total_fiat = limite_sup - limite_inf
         tamano_grid_fiat = precio_actual * espaciado_pct
         grids_matematicos = rango_total_fiat / (tamano_grid_fiat + 1e-9)
-        num_grids_total = max(4, min(math.floor(grids_matematicos * grid_density_factor), 150))
+        num_grids_total = max(4, min(math.floor(grids_matematicos * densidad_final), 150))
         
         # 🎯 Ajuste crucial: Garantizar margen mínimo por línea (ej. 5 USDT)
         min_margin = float(self.overrides.get("MIN_MARGIN_PER_LINE", 5.0))
@@ -103,12 +115,12 @@ class OptimizadorGrid:
         num_grids_total = min(num_grids_total, max_grids_posibles)
         
         capital_por_linea = capital_total / num_grids_total
-        tamaño_orden_usdt = (capital_por_linea * apalancamiento) * capital_factor
+        tamaño_orden_usdt = (capital_por_linea * apalancamiento) * capital_factor_final
 
         return {
             "symbol": symbol,
             "valido": True,
-            "modo": modo.upper(),
+            "modo": modo_final,
             "precio_actual": round(precio_actual, 5),
             "apalancamiento": apalancamiento,
             "limite_superior": round(limite_sup, 5),
@@ -116,5 +128,10 @@ class OptimizadorGrid:
             "num_grids": num_grids_total,
             "espaciado_pct": round(espaciado_pct, 6),
             "capital_por_linea": round(capital_por_linea, 2),
-            "tamaño_orden_usdt": round(tamaño_orden_usdt, 2)
+            "tamaño_orden_usdt": round(tamaño_orden_usdt, 2),
+            "grid_quality": round(grid_quality, 4),
+            "riesgo": round(riesgo, 4),
+            "densidad_factor_final": round(densidad_final, 4),
+            "capital_factor_final": round(capital_factor_final, 4),
+            "apalancamiento_factor_final": round(leverage_factor_final, 4),
         }

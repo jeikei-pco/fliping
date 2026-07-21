@@ -41,6 +41,107 @@ class GridMetrics:
     grid_step_optimo: float
     atr_pct: float
     rango_vela_mediano: float
+    riesgo_volatilidad: float
+    indice_tendencia: float
+    indice_reversion: float
+    eficiencia_grid: float
+    grid_quality: float
+    riesgo: float
+    densidad_sugerida: float
+    capital_factor: float
+    apalancamiento_factor: float
+    modo_preferido: str
+
+
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(float(value), max_value))
+
+
+def _calcular_perfil_operativo(
+    df5: pd.DataFrame,
+    *,
+    atr_pct: float,
+    deriva: float,
+    consistencia: float,
+    simetria: float,
+    oscilacion: float,
+    pct_util: float,
+    ops: float,
+    zigzag_score: float,
+    recorrido_real_mediano: float,
+    rango_vela_mediano: float,
+    grid_step_optimo: float,
+) -> Dict[str, Any]:
+    """
+    Convierte las metricas del analizador en factores accionables para el optimizador.
+    Todos los indices normalizados usan rangos acotados para evitar parametros extremos.
+    """
+    close_ini = float(df5.close.iloc[0])
+    close_fin = float(df5.close.iloc[-1])
+    retorno_total = (close_fin - close_ini) / (close_ini + 1e-9)
+
+    riesgo_volatilidad = _clamp((atr_pct / 0.015) * 0.55 + (deriva / 0.12) * 0.45, 0.0, 1.0)
+    fuerza_tendencia = _clamp(abs(retorno_total) / (deriva + 1e-9), 0.0, 1.0)
+    indice_tendencia = fuerza_tendencia if retorno_total >= 0 else -fuerza_tendencia
+
+    indice_reversion = _clamp(
+        zigzag_score * 0.40
+        + simetria * 0.20
+        + consistencia * 0.20
+        + _clamp(oscilacion / 3.0, 0.0, 1.0) * 0.20,
+        0.0,
+        1.0,
+    )
+
+    eficiencia_grid = _clamp(
+        pct_util * 0.35
+        + _clamp(ops / 2.0, 0.0, 1.0) * 0.25
+        + _clamp(recorrido_real_mediano / (grid_step_optimo + 1e-9), 0.0, 2.0) * 0.20 / 2.0
+        + _clamp(rango_vela_mediano / (grid_step_optimo + 1e-9), 0.0, 2.0) * 0.20 / 2.0,
+        0.0,
+        1.0,
+    )
+
+    grid_quality = _clamp(
+        zigzag_score * 0.35
+        + eficiencia_grid * 0.30
+        + indice_reversion * 0.20
+        + consistencia * 0.15,
+        0.0,
+        1.0,
+    )
+
+    riesgo = _clamp(
+        riesgo_volatilidad * 0.50
+        + (1.0 - consistencia) * 0.25
+        + abs(indice_tendencia) * 0.25,
+        0.0,
+        1.0,
+    )
+
+    densidad_sugerida = _clamp(0.85 + grid_quality * 0.45 - riesgo * 0.20, 0.75, 1.25)
+    capital_factor = _clamp(0.85 + grid_quality * 0.35 - riesgo * 0.25, 0.70, 1.20)
+    apalancamiento_factor = _clamp(1.15 - riesgo * 0.35 + grid_quality * 0.10, 0.75, 1.15)
+
+    if indice_tendencia > 0.35 and indice_reversion < 0.78:
+        modo_preferido = "LONG"
+    elif indice_tendencia < -0.35 and indice_reversion < 0.78:
+        modo_preferido = "SHORT"
+    else:
+        modo_preferido = "NEUTRAL"
+
+    return {
+        "riesgo_volatilidad": round(riesgo_volatilidad, 4),
+        "indice_tendencia": round(indice_tendencia, 4),
+        "indice_reversion": round(indice_reversion, 4),
+        "eficiencia_grid": round(eficiencia_grid, 4),
+        "grid_quality": round(grid_quality, 4),
+        "riesgo": round(riesgo, 4),
+        "densidad_sugerida": round(densidad_sugerida, 4),
+        "capital_factor": round(capital_factor, 4),
+        "apalancamiento_factor": round(apalancamiento_factor, 4),
+        "modo_preferido": modo_preferido,
+    }
 
 
 def _fetch_5m(exchange: Any, symbol: str, limit: int) -> pd.DataFrame:
@@ -260,6 +361,21 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
             ops, pct_util, consistencia, sim, osc, deriva, rango_vela_mediano
         )
 
+        perfil_operativo = _calcular_perfil_operativo(
+            df5,
+            atr_pct=atr_pct,
+            deriva=deriva,
+            consistencia=consistencia,
+            simetria=sim,
+            oscilacion=osc,
+            pct_util=pct_util,
+            ops=ops,
+            zigzag_score=zigzag_score,
+            recorrido_real_mediano=recorrido_real_mediano,
+            rango_vela_mediano=rango_vela_mediano,
+            grid_step_optimo=grid_step_optimo,
+        )
+
         # 7. Formatear y retornar mediante DataClass
         precio_actual = precio_vivo if precio_vivo else float(df5.close.iloc[-1])
         
@@ -278,7 +394,17 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
             recorrido_real=round(recorrido_real_mediano, 6),
             grid_step_optimo=round(grid_step_optimo, 6),
             atr_pct=round(atr_pct, 6),
-            rango_vela_mediano=round(rango_vela_mediano, 6)
+            rango_vela_mediano=round(rango_vela_mediano, 6),
+            riesgo_volatilidad=perfil_operativo["riesgo_volatilidad"],
+            indice_tendencia=perfil_operativo["indice_tendencia"],
+            indice_reversion=perfil_operativo["indice_reversion"],
+            eficiencia_grid=perfil_operativo["eficiencia_grid"],
+            grid_quality=perfil_operativo["grid_quality"],
+            riesgo=perfil_operativo["riesgo"],
+            densidad_sugerida=perfil_operativo["densidad_sugerida"],
+            capital_factor=perfil_operativo["capital_factor"],
+            apalancamiento_factor=perfil_operativo["apalancamiento_factor"],
+            modo_preferido=perfil_operativo["modo_preferido"],
         )
         
         return metrics.__dict__

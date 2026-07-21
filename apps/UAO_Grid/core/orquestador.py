@@ -156,6 +156,7 @@ class GridOrquestador:
         self.limit = int(os.getenv("SCAN_LIMIT", 1200))
         self.min_volume = float(os.getenv("SCAN_MIN_VOLUME_USDT", 1_000_000))
         self.top_n = int(os.getenv("SCAN_TOP_N", 30))
+        self.scan_cycle_count = 0
 
     def _min_qty_mercado(self, symbol: str) -> float:
         market = self.exchange.markets.get(symbol, {}) if getattr(self.exchange, "markets", None) else {}
@@ -533,18 +534,33 @@ class GridOrquestador:
         # --- NUEVO: APLICAR EL APALANCAMIENTO DINÁMICO E INICIAR SESIÓN ML ---
         leverage_optimo = engine.leverage # Fallback por defecto
         if hasattr(self, 'mejores_params') and symbol in self.mejores_params:
-            leverage_optimo = self.mejores_params[symbol].get("apalancamiento", engine.leverage)
+            params_symbol = self.mejores_params[symbol]
+            leverage_optimo = params_symbol.get("apalancamiento", engine.leverage)
             engine.leverage = leverage_optimo # Actualizar el engine
-            engine.num_grids_optimo = self.mejores_params[symbol].get("num_grids", 6)
+            engine.num_grids_optimo = params_symbol.get("num_grids", 6)
+            engine.espaciado_optimo = params_symbol.get("espaciado_pct")
+            engine.modo_estrategia = str(params_symbol.get("modo", "NEUTRAL")).upper()
+            if params_symbol.get("capital_por_linea") and params_symbol.get("num_grids"):
+                engine.capital_inicial = float(params_symbol["capital_por_linea"]) * int(params_symbol["num_grids"])
             
             # Iniciar sesión de aprendizaje para ML
             session_id = f"{symbol}_{int(time.time())}"
             self.db.create_ml_session(
                 session_id=session_id,
                 symbol=symbol,
-                analyzer_metrics=self.mejores_params[symbol].get("analisis_original", {}),
-                math_params=self.mejores_params[symbol].get("params_optimos", {}),
-                ai_factors=self.mejores_params[symbol].get("ai_overrides", {})
+                analyzer_metrics=params_symbol.get("analisis_original", {}),
+                math_params=params_symbol.get("params_optimos", {}),
+                ai_factors=params_symbol.get("ai_overrides", {}),
+                final_params=params_symbol.get("params_optimos", {}),
+                backtest_metrics={
+                    "pnl_neto": params_symbol.get("pnl_neto", 0.0),
+                    "roi_pct": params_symbol.get("roi_pct", 0.0),
+                    "drawdown": params_symbol.get("drawdown", 0.0),
+                    "win_rate": params_symbol.get("win_rate", 0.0),
+                    "profit_factor": params_symbol.get("profit_factor", 0.0),
+                    "operaciones": params_symbol.get("operaciones", 0),
+                },
+                setup_source=params_symbol.get("source", "UNKNOWN"),
             )
             logger.info(f"🧠 [ML] Nueva sesión de aprendizaje registrada para {symbol} (ID: {session_id})")
             
@@ -575,9 +591,6 @@ class GridOrquestador:
         else:
             self.provider.cancel_all_orders(symbol)
             
-        if hasattr(self, 'mejores_params') and symbol in self.mejores_params:
-            engine.espaciado_optimo = self.mejores_params[symbol].get("espaciado_pct")
-        
         try:
             precio_vivo = self.exchange.fetch_ticker(symbol).get('last')
         except:
@@ -917,7 +930,6 @@ class GridOrquestador:
         6. Se seleccionan los 3 mejores resultados finales listos para operar.
         """
         from core.backtester import backtest_grid_top, _backtest_grid_simbolo
-        from core.optimizador import OptimizadorGrid
         
         logger.info("  [1/6] Analizando mercado y filtrando símbolos operables...")
         simbolos_activos = obtener_futuros_usdt(self.exchange)
@@ -968,6 +980,8 @@ class GridOrquestador:
                         overrides_simbolo["LEVERAGE_FACTOR"] = clamp(float(overrides_simbolo["LEVERAGE_FACTOR"]), 0.8, 1.15)
                     if "CAPITAL_FACTOR" in overrides_simbolo:
                         overrides_simbolo["CAPITAL_FACTOR"] = clamp(float(overrides_simbolo["CAPITAL_FACTOR"]), 0.7, 1.3)
+                    if "GRID_STEP_FACTOR" in overrides_simbolo:
+                        overrides_simbolo["GRID_STEP_FACTOR"] = clamp(float(overrides_simbolo["GRID_STEP_FACTOR"]), 0.8, 1.2)
 
                     # Guardar en base de datos de manera específica por símbolo
                     self.db.update_symbol_config_overrides(sym, overrides_simbolo)
@@ -976,17 +990,21 @@ class GridOrquestador:
                     analisis_original = item.get("analisis_original")
                     if analisis_original:
                         # Re-simular el backtest aplicando la optimización del símbolo
-                        res_nuevo = _backtest_grid_simbolo(self.exchange, analisis_original, capital_total=capital_inicial)
+                        res_nuevo = _backtest_grid_simbolo(
+                            self.exchange,
+                            analisis_original,
+                            capital_total=capital_inicial,
+                            overrides=overrides_simbolo,
+                        )
                         
                         # Comparativa: ¿Mejoró el PnL neto con la IA?
                         if res_nuevo.get("pnl_neto", -999.0) != -999.0 and res_nuevo["pnl_neto"] > item["pnl_neto"]:
                             logger.info(f"✨ [AI-WIN] La IA superó el PnL en {sym}: Base=$ {item['pnl_neto']:.2f} vs IA=$ {res_nuevo['pnl_neto']:.2f}")
                             res_nuevo["timeframe"] = "5m"
-                            res_nuevo["modo"] = res_nuevo["modo_optimo"]
-                            res_nuevo["apalancamiento"] = res_nuevo["apalancamiento_usado"]
                             resultados_finales.append(res_nuevo)
                         else:
                             logger.info(f"⚖️ [MATH-WIN] La configuración base fue mejor o igual para {sym}. Manteniendo base.")
+                            item["ai_overrides"] = overrides_simbolo
                             resultados_finales.append(item)
                     else:
                         resultados_finales.append(item)
@@ -999,7 +1017,12 @@ class GridOrquestador:
         resultados_finales.sort(key=lambda x: x["pnl_neto"], reverse=True)
         
         # Seleccionar el Top 3 final listo para operar en vivo/demo
-        top_3_symbols = [res["symbol"] for res in resultados_finales[:3]]
+        top_3_resultados = resultados_finales[:3]
+        self.mejores_params = {res["symbol"]: res for res in top_3_resultados}
+        self.scan_cycle_count += 1
+        ranking_serializable = json.loads(json.dumps(top_3_resultados, default=str))
+        self.db.save_scanner_state(ranking_serializable, self.scan_cycle_count)
+        top_3_symbols = [res["symbol"] for res in top_3_resultados]
         
         logger.info(f"🚀 [6/6] Símbolos seleccionados y validados para iniciar operación: {top_3_symbols}")
         return top_3_symbols
