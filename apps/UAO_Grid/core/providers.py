@@ -15,52 +15,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional
 
 import ccxt
+from core.models import Order, Position, TradeFill
 
 logger = logging.getLogger("UAO_Sclaping.Providers")
-
-
-class Order:
-    """Orden de dominio independiente del exchange."""
-
-    def __init__(self, order_id: str, symbol: str, side: str, price: float, qty: float,
-                 status: str = "OPEN", reduce_only: bool = False, grid_level: int = 0):
-        self.order_id = order_id
-        self.symbol = symbol
-        self.side = side.upper()
-        self.price = float(price)
-        self.qty = float(qty)
-        self.status = status
-        self.reduce_only = bool(reduce_only)
-        self.grid_level = int(grid_level or 0)
-
-    @property
-    def inst_id(self) -> str:
-        return self.symbol.replace("/", "-").replace(":USDT", "-SWAP")
-
-    def __eq__(self, other):
-        if not isinstance(other, Order):
-            return False
-        # Tolerancia de +/- 1 tick aproximado (0.05% del precio)
-        price_match = abs(self.price - other.price) <= (self.price * 0.0005)
-        
-        # ✅ FIX: Eliminamos la validación de qty_match para soportar partial fills
-        # Las órdenes de grid se identifican por precio y lado.
-        return (
-            self.symbol == other.symbol
-            and self.side == other.side
-            and price_match
-            and self.reduce_only == other.reduce_only
-        )
-
-
-class Position:
-    """Posicion de dominio."""
-
-    def __init__(self, symbol: str, side: str, qty: float, entry_price: float):
-        self.symbol = symbol
-        self.side = side.upper()
-        self.qty = abs(float(qty))
-        self.entry_price = float(entry_price or 0.0)
 
 
 class ExecutionProvider(ABC):

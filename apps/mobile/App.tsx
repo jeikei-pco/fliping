@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   ActivityIndicator,
@@ -228,6 +228,18 @@ export default function App() {
   const [showGridConfig, setShowGridConfig] = useState(false);
   const [uaoGridStatus, setUaoGridStatus] = useState<any>(null);
   
+  const [pnl24h, setPnl24h] = useState<number>(0);
+  const lastPnlUpdateRef = useRef<number>(0);
+
+  const loadPnl24h = async () => {
+    try {
+      const storedPnl = await AsyncStorage.getItem("@grid_pnl_24h");
+      const storedTime = await AsyncStorage.getItem("@grid_pnl_24h_time");
+      if (storedPnl) setPnl24h(parseFloat(storedPnl));
+      if (storedTime) lastPnlUpdateRef.current = parseInt(storedTime, 10);
+    } catch (e) {}
+  };
+  
   const [gridBaseCapital, setGridBaseCapital] = useState("50");
   const [gridMaxLeverage, setGridMaxLeverage] = useState("15");
 
@@ -288,6 +300,7 @@ export default function App() {
   useEffect(() => {
     let dashboardInterval: ReturnType<typeof setInterval>;
     if (screen === "dashboard") {
+      void loadPnl24h();
       void Promise.all([loadEngineConfig(), loadCredentials(), loadBalances(), loadEngineStatus(), loadFlippingEngines(), loadGridMetrics(), loadUaoGridStatus()]);
       dashboardInterval = setInterval(() => {
         void loadGridMetrics();
@@ -609,6 +622,15 @@ export default function App() {
     try {
       const res = await callApi<any>("/api/grid/status");
       setUaoGridStatus(res);
+      
+      const currentPnl = res?.position?.pnl ?? res?.pnl ?? 0;
+      const now = Date.now();
+      if (now - lastPnlUpdateRef.current >= 3600000) {
+        setPnl24h(currentPnl);
+        lastPnlUpdateRef.current = now;
+        await AsyncStorage.setItem("@grid_pnl_24h", currentPnl.toString());
+        await AsyncStorage.setItem("@grid_pnl_24h_time", now.toString());
+      }
     } catch (e: any) {
       // silent
     }
@@ -1034,11 +1056,11 @@ export default function App() {
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                     <Text style={{ color: colors.muted, fontSize: 14 }}>PnL 24h:</Text>
                     <Text style={{ 
-                      color: (uaoGridStatus?.position?.pnl ?? 0) >= 0 ? colors.success : colors.danger,
+                      color: pnl24h >= 0 ? colors.success : colors.danger,
                       fontSize: 16,
                       fontWeight: "bold" 
                     }}>
-                      {(uaoGridStatus?.position?.pnl ?? 0) >= 0 ? "+" : ""}{(uaoGridStatus?.position?.pnl ?? 0).toFixed(2)}
+                      {pnl24h >= 0 ? "+" : ""}{pnl24h.toFixed(2)}
                     </Text>
                   </View>
                 </View>

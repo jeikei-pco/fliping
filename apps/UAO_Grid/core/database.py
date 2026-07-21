@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -21,11 +22,15 @@ class Database:
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._init_db()
 
+    @contextmanager
     def _get_connection(self):
         """Retorna una nueva conexión SQLite. IMPORTANTE: No compartir entre hilos."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Inicializa las tablas de la base de datos."""
@@ -94,6 +99,8 @@ class Database:
                     CREATE TABLE IF NOT EXISTS grid_state (
                         symbol TEXT PRIMARY KEY,
                         levels_json TEXT NOT NULL,
+                        cycles_json TEXT NOT NULL DEFAULT '{}',
+                        blocked_levels_json TEXT NOT NULL DEFAULT '[]',
                         atr_value REAL NOT NULL,
                         center_price REAL NOT NULL,
                         modo_drenaje BOOLEAN NOT NULL DEFAULT 0,
@@ -155,6 +162,10 @@ class Database:
                         gross_loss REAL DEFAULT 0.0
                     )
                 ''')
+                self._ensure_columns(cursor, "grid_state", {
+                    "cycles_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "blocked_levels_json": "TEXT NOT NULL DEFAULT '[]'",
+                })
                 self._ensure_columns(cursor, "ml_history", {
                     "final_params": "TEXT NOT NULL DEFAULT '{}'",
                     "backtest_metrics": "TEXT NOT NULL DEFAULT '{}'",
@@ -259,16 +270,20 @@ class Database:
                 # 4. Update Grid State
                 if grid_state:
                     cursor.execute('''
-                        INSERT INTO grid_state (symbol, levels_json, atr_value, center_price, modo_drenaje, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO grid_state (symbol, levels_json, cycles_json, blocked_levels_json, atr_value, center_price, modo_drenaje, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(symbol) DO UPDATE SET
                             levels_json=excluded.levels_json,
+                            cycles_json=excluded.cycles_json,
+                            blocked_levels_json=excluded.blocked_levels_json,
                             atr_value=excluded.atr_value,
                             center_price=excluded.center_price,
                             modo_drenaje=excluded.modo_drenaje,
                             updated_at=excluded.updated_at
-                    ''', (grid_state['symbol'], json.dumps(grid_state['levels']), 
-                          grid_state['atr_value'], grid_state['center_price'], 
+                    ''', (grid_state['symbol'], self._json_dumps(grid_state['levels']),
+                          self._json_dumps(grid_state.get('cycles', {})),
+                          self._json_dumps(grid_state.get('blocked_levels', [])),
+                          grid_state['atr_value'], grid_state['center_price'],
                           int(grid_state.get('modo_drenaje', False)), now))
 
                 conn.commit()
@@ -469,17 +484,44 @@ class Database:
     def load_grid_state(self, symbol: str) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT levels_json, atr_value, center_price, modo_drenaje FROM grid_state WHERE symbol=?", (symbol,))
+            cursor.execute("SELECT levels_json, cycles_json, blocked_levels_json, atr_value, center_price, modo_drenaje FROM grid_state WHERE symbol=?", (symbol,))
             row = cursor.fetchone()
             if row:
                 return {
                     "symbol": symbol,
                     "levels": json.loads(row["levels_json"]),
+                    "cycles": json.loads(row["cycles_json"] or "{}"),
+                    "blocked_levels": json.loads(row["blocked_levels_json"] or "[]"),
                     "atr_value": row["atr_value"],
                     "center_price": row["center_price"],
                     "modo_drenaje": bool(row["modo_drenaje"])
                 }
             return None
+
+    def save_grid_cycles(self, symbol: str, levels: List[Dict[str, Any]],
+                         cycles: Dict[str, Any], blocked_levels: List[int],
+                         atr_value: float = 0.0, center_price: float = 0.0,
+                         modo_drenaje: bool = False):
+        """Persiste ciclos y niveles inmediatamente después de un fill."""
+        with self._lock:
+            with self._get_connection() as conn:
+                now = datetime.utcnow().isoformat()
+                conn.execute('''
+                    INSERT INTO grid_state
+                    (symbol, levels_json, cycles_json, blocked_levels_json, atr_value, center_price, modo_drenaje, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                      levels_json=excluded.levels_json,
+                      cycles_json=excluded.cycles_json,
+                      blocked_levels_json=excluded.blocked_levels_json,
+                      atr_value=excluded.atr_value,
+                      center_price=excluded.center_price,
+                      modo_drenaje=excluded.modo_drenaje,
+                      updated_at=excluded.updated_at
+                ''', (symbol, self._json_dumps(levels), self._json_dumps(cycles),
+                      self._json_dumps(list(blocked_levels)), float(atr_value or 0.0),
+                      float(center_price or 0.0), int(bool(modo_drenaje)), now))
+                conn.commit()
 
     # ── AI OPTIMIZER OVERRIDES ──
 

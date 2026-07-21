@@ -55,7 +55,7 @@ services:
     environment:
       UAO_NAME: "UAO_Grid_okx"
       UAO_RUNTIME: "docker-compose"
-      WEBHOOK_URL: "http://192.168.0.49:4000/api/webhook/grid"
+      WEBHOOK_URL: "http://host.docker.internal:4000/api/webhook/grid"
       PYTHONUNBUFFERED: "1"
     env_file:
       - ./apps/UAO_Grid/.env
@@ -76,7 +76,7 @@ services:
     environment:
       UAO_NAME: "UAO_Grid_V2"
       UAO_RUNTIME: "docker-compose"
-      WEBHOOK_URL: "http://192.168.0.11:4000/api/webhook/grid"
+      WEBHOOK_URL: "http://host.docker.internal:4000/api/webhook/grid"
       PYTHONUNBUFFERED: "1"
     env_file:
       - ./apps/UAO_Grid/.env

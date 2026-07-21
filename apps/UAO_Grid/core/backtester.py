@@ -4,17 +4,36 @@ Simula el comportamiento Multidireccional (Neutral), Long y Short.
 Aplica la relación entre Alto Apalancamiento = Menor Distancia.
 """
 import logging
+import time
 import pandas as pd
 from typing import Any, Dict, List, Optional
+from core.models import ValidatedOptimizationProfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger("UAO_Sclaping.GridBacktester")
+
+WINDOW_24H_MS = 24 * 60 * 60 * 1000
+FIVE_MINUTES_MS = 5 * 60 * 1000
+ONE_SECOND_MS = 1000
+FIVE_MIN_24H_LIMIT = 24 * 60 // 5
+ONE_SEC_24H_LIMIT = 24 * 60 * 60
+MAX_5M_STALENESS_MS = 10 * 60 * 1000
+MAX_1S_STALENESS_MS = 5 * 60 * 1000
 
 
 def _normalizar_analisis_backtest(analisis: Dict[str, Any]) -> Dict[str, Any]:
     from core.optimizador import _normalizar_analisis
 
     return _normalizar_analisis(analisis)
+
+
+def _ohlcv_to_df(velas: Any) -> pd.DataFrame:
+    if isinstance(velas, pd.DataFrame):
+        return velas.copy()
+    if not velas:
+        return pd.DataFrame()
+    return pd.DataFrame(velas, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
 
 # ==========================================
 # 1. MOTOR DE SIMULACIÓN DINÁMICA (Réplica del Grid Futuros)
@@ -134,33 +153,68 @@ def _normalizar_resultado_backtest(
     analisis: Dict[str, Any],
     source: str,
     ai_overrides: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    capital_total: float,
+    fee_maker: float,
+    fee_taker: float,
+) -> ValidatedOptimizationProfile:
     modo = str(params.get("modo", "NEUTRAL")).upper()
     apalancamiento = int(params.get("apalancamiento", params.get("apalancamiento_usado", 1)))
     num_grids = int(params.get("num_grids", 0))
     espaciado_pct = float(params.get("espaciado_pct", res.get("espaciado_pct", 0.0)))
 
-    res.update({
-        "symbol": symbol,
-        "modo_optimo": modo,
-        "modo": modo,
-        "apalancamiento_usado": apalancamiento,
-        "apalancamiento": apalancamiento,
-        "num_grids": num_grids,
-        "espaciado_pct": espaciado_pct,
-        "params_optimos": params,
-        "analisis_original": analisis,
+    optimization_params = {
+        "grid_spacing_pct": espaciado_pct,
+        "grid_lines": num_grids,
+        "capital": capital_total, # Necesitamos pasar capital_total a esta función
+        "leverage": apalancamiento,
+        "min_profit_pct": params.get("min_profit_pct", 0.0010),
+        "maker_fee": fee_maker, # Necesitamos pasar fee_maker y fee_taker
+        "taker_fee": fee_taker,
+        "preferred_mode": modo,
+        "rebalance_distance": params.get("rebalance_distance", 0.0), # Asumir default por ahora
+        "inventory_limit": params.get("inventory_limit", 0), # Asumir default por ahora
+        "max_orders": params.get("max_orders", 0), # Asumir default por ahora
+        "grid_direction": params.get("grid_direction", "NEUTRAL"), # Asumir default por ahora
+    }
+
+    backtest_metrics = {
+        "ROI": res.get("roi_pct", 0.0),
+        "PnL": res.get("pnl_neto", 0.0),
+        "Drawdown": res.get("drawdown", 0.0),
+        "ProfitFactor": res.get("profit_factor", 0.0),
+        "WinRate": res.get("win_rate", 0.0),
+        "Trades": res.get("operaciones", 0),
+        "Expectancy": params.get("expectancy", 0.0), # Asumir default por ahora
+        "Sharpe": params.get("sharpe", 0.0), # Asumir default por ahora
+        "Calmar": params.get("calmar", 0.0), # Asumir default por ahora
+    }
+
+    analysis_metrics = {
+        "atr": analisis.get("atr", 0.0),
+        "atr_pct": analisis.get("atr_pct", 0.0),
+        "volatility": analisis.get("volatility", 0.0),
+        "risk": analisis.get("riesgo", 0.0),
+        "trend": analisis.get("deriva_pct", 0.0),
+        "grid_quality": analisis.get("grid_quality", 0.0),
+        "market_phase": analisis.get("market_phase", "UNKNOWN"),
+        "oscillation": analisis.get("oscilacion", 0.0),
+        "score": analisis.get("score", 0.0),
+    }
+
+    metadata = {
         "source": source,
         "ai_overrides": ai_overrides or {},
-    })
-    return res
+        "recent_activity": res.get("recent_activity", {}),
+    }
 
+    return ValidatedOptimizationProfile(
+        symbol=symbol,
+        analysis=analysis_metrics,
+        optimization=optimization_params,
+        backtest=backtest_metrics,
+        metadata=metadata,
+    )
 
-def _fetch_backtest_df(exchange: Any, symbol: str) -> pd.DataFrame:
-    velas = exchange.fetch_ohlcv(symbol, "5m", limit=288)
-    if not velas or len(velas) < 100:
-        return pd.DataFrame()
-    return pd.DataFrame(velas, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
 
 def _backtest_configuracion(
@@ -172,7 +226,7 @@ def _backtest_configuracion(
     source: str = "CONFIG",
     ai_overrides: Optional[Dict[str, Any]] = None,
     df: Optional[pd.DataFrame] = None,
-) -> Dict[str, Any]:
+) -> ValidatedOptimizationProfile:
     analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
     market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
@@ -180,13 +234,25 @@ def _backtest_configuracion(
     fee_taker = float(market.get("taker", 0.00050))
 
     if not params or not params.get("valido", True):
-        return {"symbol": symbol, "pnl_neto": -999.0, "source": source}
+        return ValidatedOptimizationProfile(
+            symbol=symbol,
+            analysis=analisis,
+            optimization=params or {},
+            backtest={"PnL": -999.0},
+            metadata={"source": source}
+        )
 
     try:
         if df is None:
-            df = _fetch_backtest_df(exchange, symbol)
-        if df.empty:
-            return {"symbol": symbol, "pnl_neto": -999.0, "source": source}
+            df = analisis.get("df_5m")
+        if df is None or df.empty:
+            return ValidatedOptimizationProfile(
+                symbol=symbol,
+                analysis=analisis,
+                optimization=params,
+                backtest={"PnL": -999.0},
+                metadata={"source": source}
+            )
 
         params_prueba = {
             "modo": str(params.get("modo", "NEUTRAL")).upper(),
@@ -198,7 +264,14 @@ def _backtest_configuracion(
         }
         res = _simular_grid_dinamico(df, params_prueba, capital_total, fee_maker, fee_taker)
         if res.get("pnl_neto", -999.0) == -999.0:
-            return {"symbol": symbol, "pnl_neto": -999.0, "source": source}
+            return ValidatedOptimizationProfile(
+                symbol=symbol,
+                analysis=analisis,
+                optimization=params,
+                backtest={"PnL": -999.0},
+                metadata={"source": source}
+            )
+
         resultado = _normalizar_resultado_backtest(
             res,
             symbol=symbol,
@@ -206,10 +279,14 @@ def _backtest_configuracion(
             analisis=analisis,
             source=source,
             ai_overrides=ai_overrides,
+            capital_total=capital_total,
+            fee_maker=fee_maker,
+            fee_taker=fee_taker,
         )
-        if resultado.get("pnl_neto", -999.0) > 0:
+        # El objeto ValidatedOptimizationProfile ya contiene recent_activity en metadata
+        if resultado.backtest.get("PnL", -999.0) > 0:
             logger.info(
-                "  [BT-WIN-%s] %-15s PnL=$%6.2f | Modo:%-7s | Lev:%2dx | Lineas:%2d | Dist:%.3f%% | Ops:%3d",
+                "  [BT-WIN-%s] %-15s PnL=$%6.2f | Modo:%-7s | Lev:%2dx | Lineas:%2d | Dist:%.3f%% | Ops:%3d | Ventana:24h",
                 source,
                 symbol,
                 resultado["pnl_neto"],
@@ -222,7 +299,13 @@ def _backtest_configuracion(
         return resultado
     except Exception as e:
         logger.warning(f"  [BT-{source}] Error probando {symbol}: {e}")
-        return {"symbol": symbol, "pnl_neto": -999.0, "source": source}
+        return ValidatedOptimizationProfile(
+            symbol=symbol,
+            analysis=analisis,
+            optimization=params or {},
+            backtest={"PnL": -999.0},
+            metadata={"source": source}
+        )
 
 
 def _backtest_con_optimizador(
@@ -231,15 +314,20 @@ def _backtest_con_optimizador(
     capital_total: float,
     overrides: Optional[Dict[str, Any]] = None,
     modo: str = "NEUTRAL",
-) -> Dict[str, Any]:
+) -> ValidatedOptimizationProfile:
     from core.optimizador import OptimizadorGrid
 
     analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
     try:
-        df = _fetch_backtest_df(exchange, symbol)
-        if df.empty:
-            return {"symbol": symbol, "pnl_neto": -999.0, "source": "OPTIMIZER"}
+        df = analisis.get("df_5m")
+        if df is None or df.empty:
+            return ValidatedOptimizationProfile(
+                symbol=symbol,
+                analysis=analisis,
+                backtest={"PnL": -999.0},
+                metadata={"source": "OPTIMIZER"}
+            )
         params = OptimizadorGrid(overrides=overrides).optimizar_symbol(symbol, df, capital_total, analisis, modo=modo)
         return _backtest_configuracion(
             exchange,
@@ -252,7 +340,12 @@ def _backtest_con_optimizador(
         )
     except Exception as e:
         logger.warning(f"  [BT-OPT] Error optimizando {symbol}: {e}")
-        return {"symbol": symbol, "pnl_neto": -999.0, "source": "AI" if overrides else "MATH"}
+        return ValidatedOptimizationProfile(
+            symbol=symbol,
+            analysis=analisis,
+            backtest={"PnL": -999.0},
+            metadata={"source": "AI" if overrides else "MATH"}
+        )
 
 # ==========================================
 # 2. ORQUESTADOR DE BACKTEST (Fuerza Bruta Múltiple)
@@ -263,7 +356,7 @@ def _backtest_grid_simbolo(
     capital_total: float,
     overrides: Optional[Dict[str, Any]] = None,
     params_candidatos: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+) -> ValidatedOptimizationProfile:
     analisis = _normalizar_analisis_backtest(analisis)
     symbol = analisis["symbol"]
 
@@ -281,7 +374,7 @@ def _backtest_grid_simbolo(
 
     return _backtest_con_optimizador(exchange, analisis, capital_total)
 
-def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital: float, leverage: float = None, ia_overrides: Dict[str, Any] = None, slippage_pct: float = 0.0) -> List[Dict[str, Any]]:
+def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital: float, leverage: float = None, ia_overrides: Dict[str, Any] = None, slippage_pct: float = 0.0) -> List[ValidatedOptimizationProfile]:
     resultados = []
     
     # Hilos en paralelo para no bloquear el bot
@@ -298,10 +391,10 @@ def backtest_grid_top(exchange: Any, top_analisis: List[Dict[str, Any]], capital
         }
         for fut in as_completed(futs):
             res = fut.result()
-            if res.get("pnl_neto", -999.0) != -999.0:
-                res["timeframe"] = "5m"
+            if res.backtest.get("PnL", -999.0) != -999.0:
+                # res.metadata["timeframe"] = "5m" # No es necesario, ya está en analysis
                 resultados.append(res)
                 
     # Ordena de mayor ganancia a menor ganancia
-    resultados.sort(key=lambda x: x["pnl_neto"], reverse=True)
+    resultados.sort(key=lambda x: x.backtest.get("PnL", -999.0), reverse=True)
     return resultados

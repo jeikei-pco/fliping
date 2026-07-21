@@ -153,7 +153,7 @@ class GridOrquestador:
             
         self.ciclo_segundos = int(os.getenv("SCAN_CYCLE_SECONDS", 1800))
         self.timeframe = os.getenv("SCAN_TIMEFRAME", "5m")
-        self.limit = int(os.getenv("SCAN_LIMIT", 1200))
+        self.limit = int(os.getenv("SCAN_LIMIT", 288))
         self.min_volume = float(os.getenv("SCAN_MIN_VOLUME_USDT", 1_000_000))
         self.top_n = int(os.getenv("SCAN_TOP_N", 30))
         self.scan_cycle_count = 0
@@ -233,14 +233,30 @@ class GridOrquestador:
                     logger.debug(f"Fill WS ignorado para {symbol}, no hay engine activo.")
                     return
                 market_info = self.exchange.markets.get(symbol, {})
-                engine.procesar_ejecucion_simulada(side, price, qty, grid_level, market_info)
+                fill_timestamp = float(fill_data.get("ts") or fill_data.get("fillTime") or time.time())
+                if fill_timestamp > 10_000_000_000:
+                    fill_timestamp /= 1000.0
+                engine.procesar_ejecucion_simulada(
+                    side, price, qty, grid_level, market_info,
+                    fill_fee=float(fill_data.get("fee") or 0.0),
+                    order_id=str(fill_data.get("ordId") or cl_ord_id or ""),
+                    fill_timestamp=fill_timestamp,
+                )
+                self.db.save_grid_cycles(
+                    symbol=symbol,
+                    levels=engine.niveles,
+                    cycles=engine.cycles_snapshot(),
+                    blocked_levels=engine.blocked_levels,
+                    center_price=engine.centro_grid,
+                    modo_drenaje=engine.modo_drenaje,
+                )
                 
                 # --- NUEVO: FORZAR RECONCILIACIÓN INMEDIATA ---
                 logger.info(f"⚡ [WS] Triggering instant reconciliation for {symbol} TP/Grid adjustment.")
                 self._ejecutar_reconciliacion_inmediata(symbol)
                 # ----------------------------------------------
                 
-                event_ts = time.time()
+                event_ts = fill_timestamp
                 
                 # --- NUEVO: REGISTRO HISTÓRICO Y APRENDIZAJE ML ---
                 realized_pnl = float(fill_data.get("pnl") or 0.0)
@@ -427,15 +443,12 @@ class GridOrquestador:
                     engine.modo_drenaje = False
                     logger.info(f"✅ {symbol} volvió al Top. Cancelando drenaje.")
                 
-                # Actualizar parámetros si es necesario
-                if hasattr(self, 'mejores_params') and symbol in self.mejores_params:
-                    engine.espaciado_optimo = self.mejores_params[symbol].get("espaciado_pct")
-                df_5m = self._fetch_velas(symbol)
+                # Actualizar la malla con el perfil validado del último backtest.
                 try:
                     precio_vivo = self.exchange.fetch_ticker(symbol).get('last')
-                except:
+                except Exception:
                     precio_vivo = None
-                engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_vivo)
+                self._inicializar_engine_con_profile(engine, symbol, precio_vivo, rebuild=True)
             else:
                 # Símbolo ya no está en el Top. Decidir si mantener (momentum) o drenar
                 if not pos_actual:
@@ -519,6 +532,35 @@ class GridOrquestador:
             logger.error(f"❌ Error fetching velas for {symbol}: {e}")
             return pd.DataFrame()
 
+    def _profile_para_symbol(self, symbol: str):
+        return getattr(self, "mejores_params", {}).get(symbol)
+
+    def _inicializar_engine_con_profile(self, engine: GridEngine, symbol: str, precio: float, rebuild: bool = True) -> bool:
+        profile = self._profile_para_symbol(symbol)
+        if not profile:
+            logger.warning("⚠️ No hay ValidatedOptimizationProfile para %s; no se inicializa malla.", symbol)
+            return False
+        if not precio or float(precio) <= 0:
+            try:
+                precio = float(self.exchange.fetch_ticker(symbol).get("last") or 0.0)
+            except Exception:
+                precio = 0.0
+        if precio <= 0:
+            logger.warning("⚠️ Precio inválido para %s; no se inicializa malla.", symbol)
+            return False
+
+        engine.optimization_profile = profile
+        engine.espaciado_actual = float(profile.optimization.get("grid_spacing_pct", 0.0))
+        engine.capital_inicial = float(profile.optimization.get("capital", engine.capital_inicial))
+        engine.leverage = float(profile.optimization.get("leverage", engine.leverage))
+        engine.modo_estrategia = str(profile.optimization.get("preferred_mode", "NEUTRAL")).upper()
+        engine.num_grids_optimo = int(profile.optimization.get("grid_lines", engine.num_grids_optimo))
+        engine.num_lineas_lado = max(1, engine.num_grids_optimo // 2)
+
+        if rebuild:
+            engine.inicializar_grid(profile, float(precio))
+        return True
+
     def _iniciar_operacion(self, symbol: str):
         capital = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 50))
         leverage = float(os.getenv("GRID_LEVERAGE", 15.0))
@@ -530,6 +572,21 @@ class GridOrquestador:
 
         engine.reset()
         engine.current_symbol = symbol
+
+        persisted_grid = self.db.load_grid_state(symbol)
+        if persisted_grid:
+            engine.restore_cycles(
+                persisted_grid.get("cycles", {}),
+                persisted_grid.get("blocked_levels", []),
+            )
+            engine.niveles = persisted_grid.get("levels", [])
+            engine.centro_grid = float(persisted_grid.get("center_price") or 0.0)
+            engine.modo_drenaje = bool(persisted_grid.get("modo_drenaje", False))
+            engine.malla_modificada = True
+            logger.info(
+                "🔁 [CICLOS] Estado recuperado para %s: %d ciclos, %d niveles bloqueados.",
+                symbol, len(engine.grid_cycles), len(engine.blocked_levels),
+            )
         
         # --- NUEVO: APLICAR EL APALANCAMIENTO DINÁMICO E INICIAR SESIÓN ML ---
         leverage_optimo = engine.leverage # Fallback por defecto
@@ -584,19 +641,32 @@ class GridOrquestador:
             self.last_30_candles = []
         abiertas = self.provider.get_open_orders(symbol)
         if abiertas:
-            engine.niveles = [{"side": o.side, "price": o.price, "qty": o.qty, "level": getattr(o, "grid_level", 1)} for o in abiertas]
+            persisted_levels = list(engine.niveles)
+            engine.niveles = []
+            for o in abiertas:
+                level = getattr(o, "grid_level", 1)
+                metadata = next((n for n in persisted_levels if n.get("level") == level and n.get("side") == o.side), {})
+                engine.niveles.append({
+                    "side": o.side,
+                    "price": o.price,
+                    "qty": o.qty,
+                    "level": level,
+                    **{key: metadata[key] for key in ("cycle_id", "base_level", "base_price", "precio_original_entrada", "source_fill_price") if key in metadata},
+                })
             if not df_5m.empty:
                 engine.centro_grid = df_5m['close'].iloc[-1]
             logger.info(f"🔄 [ESTADO] Recuperados {len(engine.niveles)} niveles de órdenes abiertas para {symbol}.")
         else:
             self.provider.cancel_all_orders(symbol)
+            if persisted_grid and engine.niveles:
+                engine.malla_modificada = True
             
         try:
             precio_vivo = self.exchange.fetch_ticker(symbol).get('last')
         except:
             precio_vivo = None
             
-        engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_vivo)
+        self._inicializar_engine_con_profile(engine, symbol, precio_vivo, rebuild=not bool(abiertas))
         
         # Si no hay hilo WS para este symbol, lo levantamos
         t = threading.Thread(target=self._loop_operativo, args=(symbol,), daemon=True)
@@ -721,14 +791,17 @@ class GridOrquestador:
                     if condicion_respiracion:
                         if posicion_cerrada or (now_sec - getattr(self, 'last_atr_calc_time', 0) >= 30):
                             try:
-                                df_5m = self._fetch_velas(symbol)
-                                engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
+                                self._inicializar_engine_con_profile(
+                                    engine,
+                                    symbol,
+                                    precio_actual,
+                                    rebuild=abs(engine.posicion_neta) < 1e-9,
+                                )
                                 self.last_atr_calc_time = now_sec
-                                engine.actualizar_tps_dinamicos(df_5m)
                                 # Si hubo respiración, reajustar last_trade_time para que no spamee
                                 last_trade_time = now_sec
                             except Exception as e:
-                                logger.error(f"Error actualizando ATR en vivo para {symbol}: {e}")
+                                logger.error(f"Error refrescando perfil de grid en vivo para {symbol}: {e}")
                     # =================================================
                     
                     if engine.malla_necesita_reajuste(precio_actual) and not engine.modo_drenaje:
@@ -736,17 +809,15 @@ class GridOrquestador:
                             if engine.chequear_breakout_malla(precio_actual):
                                 logger.warning(f"🚨 [BREAKOUT] Precio fuera de límites en {symbol}. Recalculando Malla.")
                                 try:
-                                    df_5m = self._fetch_velas(symbol)
-                                    engine.calcular_espaciado_atr(df_5m, self.exchange.markets.get(symbol, {}), precio_actual)
+                                    self._inicializar_engine_con_profile(engine, symbol, precio_actual, rebuild=True)
                                 except Exception as e:
-                                    logger.error(f"Error recargando ATR tras breakout en {symbol}: {e}")
-                                engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
+                                    logger.error(f"Error recargando perfil tras breakout en {symbol}: {e}")
                             # else: 
                             # Si es solo un llenado intermedio, NO recalculamos. Mantenemos el TP estático.
                         else:
                             # Sin inventario, podemos centrar la malla libremente
                             logger.info(f"🎯 [GRID] Posición plana en {symbol}, centrando malla nueva.")
-                            engine.inicializar_grid(precio_actual, num_grids_sugerido=getattr(engine, 'num_grids_optimo', 6))
+                            self._inicializar_engine_con_profile(engine, symbol, precio_actual, rebuild=True)
                     
                     if engine.malla_modificada:
                         with self._engine_lock:
@@ -925,9 +996,7 @@ class GridOrquestador:
         1. Analizador filtra los símbolos para operar.
         2. Optimizador matemático calcula la configuración inicial por cada símbolo analizado.
         3. Se ejecuta el backtest base para todos los símbolos candidatos.
-        4. Se envía el ranking inicial a la IA en lote para optimización detallada por símbolo.
-        5. Se realiza el re-backtest con los datos de la IA y se compara con el anterior.
-        6. Se seleccionan los 3 mejores resultados finales rentables listos para operar.
+        4. Se seleccionan los mejores resultados finales rentables listos para operar.
         """
         from core.backtester import backtest_grid_top, _backtest_grid_simbolo
         
@@ -959,73 +1028,30 @@ class GridOrquestador:
         # Seleccionar los mejores después de que todos pasaron por optimizador + backtest.
         ranking_inicial = resultados_backtest[:self.top_n]
         
-        resultados_finales = []
-        
-        # 4. Enviar a AI_Optimizer el Top ya rankeado en un solo JSON (lote)
-        if self.ai_worker and ranking_inicial:
-            logger.info("  [4/6] Enviando el lote Top %d al AI Optimizer...", len(ranking_inicial))
-            ai_suggestions = self.ai_worker.optimizar_lote_top3(ranking_inicial)
-            
-            for item in ranking_inicial:
-                sym = item["symbol"]
-                overrides_simbolo = ai_suggestions.get(sym, {})
-                
-                if overrides_simbolo:
-                    # Clamping de seguridad local para los parámetros sugeridos por la IA
-                    def clamp(val, min_val, max_val):
-                        return max(min_val, min(float(val), max_val))
-                    
-                    if "GRID_STEP_PCT" in overrides_simbolo:
-                        overrides_simbolo["GRID_STEP_PCT"] = clamp(float(overrides_simbolo["GRID_STEP_PCT"]), 0.15, 5.0)
-                    if "GRID_DENSITY_FACTOR" in overrides_simbolo:
-                        overrides_simbolo["GRID_DENSITY_FACTOR"] = clamp(float(overrides_simbolo["GRID_DENSITY_FACTOR"]), 0.75, 1.25)
-                    if "LEVERAGE_FACTOR" in overrides_simbolo:
-                        overrides_simbolo["LEVERAGE_FACTOR"] = clamp(float(overrides_simbolo["LEVERAGE_FACTOR"]), 0.8, 1.15)
-                    if "CAPITAL_FACTOR" in overrides_simbolo:
-                        overrides_simbolo["CAPITAL_FACTOR"] = clamp(float(overrides_simbolo["CAPITAL_FACTOR"]), 0.7, 1.3)
-                    if "GRID_STEP_FACTOR" in overrides_simbolo:
-                        overrides_simbolo["GRID_STEP_FACTOR"] = clamp(float(overrides_simbolo["GRID_STEP_FACTOR"]), 0.8, 1.2)
-
-                    # Guardar en base de datos de manera específica por símbolo
-                    self.db.update_symbol_config_overrides(sym, overrides_simbolo)
-                    
-                    logger.info(f"  [5/6] Ejecutando Re-Backtest con configuración IA para {sym}...")
-                    analisis_original = item.get("analisis_original")
-                    if analisis_original:
-                        # Re-simular el backtest aplicando la optimización del símbolo
-                        res_nuevo = _backtest_grid_simbolo(
-                            self.exchange,
-                            analisis_original,
-                            capital_total=capital_inicial,
-                            overrides=overrides_simbolo,
-                        )
-                        
-                        # Comparativa: ¿Mejoró el PnL neto con la IA?
-                        if res_nuevo.get("pnl_neto", -999.0) != -999.0 and res_nuevo["pnl_neto"] > item["pnl_neto"]:
-                            logger.info(f"✨ [AI-WIN] La IA superó el PnL en {sym}: Base=$ {item['pnl_neto']:.2f} vs IA=$ {res_nuevo['pnl_neto']:.2f}")
-                            res_nuevo["timeframe"] = "5m"
-                            resultados_finales.append(res_nuevo)
-                        else:
-                            logger.info(f"⚖️ [MATH-WIN] La configuración base fue mejor o igual para {sym}. Manteniendo base.")
-                            item["ai_overrides"] = overrides_simbolo
-                            resultados_finales.append(item)
-                    else:
-                        resultados_finales.append(item)
-                else:
-                    resultados_finales.append(item)
-        else:
-            resultados_finales = ranking_inicial
+        resultados_finales = ranking_inicial
 
         # Ordenar los resultados finales de mayor a menor PnL
-        resultados_finales.sort(key=lambda x: x["pnl_neto"], reverse=True)
+        resultados_finales.sort(key=lambda x: x.backtest.get("PnL", -999.0), reverse=True)
         
         # Seleccionar el Top 3 final listo para operar en vivo/demo
         top_3_resultados = resultados_finales[:3]
-        self.mejores_params = {res["symbol"]: res for res in top_3_resultados}
+        self.mejores_params = {res.symbol: res for res in top_3_resultados}
         self.scan_cycle_count += 1
-        ranking_serializable = json.loads(json.dumps(top_3_resultados, default=str))
+        ranking_serializable = [res.to_legacy_dict() for res in top_3_resultados]
         self.db.save_scanner_state(ranking_serializable, self.scan_cycle_count)
-        top_3_symbols = [res["symbol"] for res in top_3_resultados]
         
-        logger.info(f"🚀 [6/6] Símbolos seleccionados y validados para iniciar operación: {top_3_symbols}")
+        # Enviar Top 10 al webhook de backtest para actualizar el UI
+        webhook_grid_url = os.getenv("WEBHOOK_URL", "http://host.docker.internal:4000/api/webhook/grid")
+        if webhook_grid_url:
+            webhook_backtest_url = webhook_grid_url.replace("/webhook/grid", "/webhook/backtest")
+            try:
+                top_10_resultados = resultados_finales[:10]
+                ranking_top_10 = [res.to_legacy_dict() for res in top_10_resultados]
+                self.webhook_queue.put((webhook_backtest_url, ranking_top_10))
+            except Exception as e:
+                logger.error(f"Error encolando webhook de backtest: {e}")
+
+        top_3_symbols = [res.symbol for res in top_3_resultados]
+        
+        logger.info(f"🚀 [4/4] Símbolos seleccionados y validados para iniciar operación: {top_3_symbols}")
         return top_3_symbols

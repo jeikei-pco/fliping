@@ -9,6 +9,14 @@ import pandas as pd
 
 logger = logging.getLogger("UAO_Scalping.GridAnalizador")
 
+WINDOW_24H_MS = 24 * 60 * 60 * 1000
+FIVE_MINUTES_MS = 5 * 60 * 1000
+ONE_SECOND_MS = 1000
+FIVE_MIN_24H_LIMIT = 24 * 60 // 5
+ONE_SEC_24H_LIMIT = 24 * 60 * 60
+MAX_5M_STALENESS_MS = 10 * 60 * 1000
+MAX_1S_STALENESS_MS = 5 * 60 * 1000
+
 
 @dataclass
 class ConfigGridAnalyzer:
@@ -332,34 +340,90 @@ def _construir_analysis_profile(
 
 
 def _fetch_5m(exchange: Any, symbol: str, limit: int) -> pd.DataFrame:
-    """Obtiene velas de 5 minutos."""
-    velas = exchange.fetch_ohlcv(symbol, timeframe="5m", limit=limit)
-    if not velas or len(velas) < limit // 2:
+    """Obtiene velas de 5 minutos para las últimas 24 horas."""
+    limit_24h = FIVE_MIN_24H_LIMIT
+    since = int(time.time() * 1000) - WINDOW_24H_MS
+    velas = _fetch_ohlcv_window(exchange, symbol, "5m", since, limit_24h, FIVE_MINUTES_MS)
+    velas = _filtrar_ventana_fresca(velas, since, MAX_5M_STALENESS_MS)
+    if not velas or len(velas) < limit_24h // 2:
         return pd.DataFrame()
-    return pd.DataFrame(velas, columns=["ts", "open", "high", "low", "close", "volume"])
+    return pd.DataFrame(velas[-limit_24h:], columns=["ts", "open", "high", "low", "close", "volume"])
 
 
-def _fetch_1m(exchange: Any, symbol: str, limit: int) -> pd.DataFrame:
-    """Obtiene velas de 1 minuto para el cálculo de recorrido interno."""
-    velas = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=limit * 5)
-    if not velas or len(velas) < limit:
+def _fetch_ohlcv_window(exchange: Any, symbol: str, timeframe: str, since: int, limit: int, step_ms: int) -> list:
+    """Descarga una ventana temporal completa aunque el exchange limite el tamaño por request."""
+    rows = []
+    cursor = since
+    max_batch = 300
+
+    while len(rows) < limit:
+        batch_limit = min(max_batch, limit - len(rows))
+        try:
+            batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=batch_limit)
+        except TypeError:
+            batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            rows = batch or []
+            break
+
+        if not batch:
+            break
+
+        for candle in batch:
+            if candle and int(candle[0]) >= since:
+                rows.append(candle)
+
+        last_ts = int(batch[-1][0])
+        next_cursor = last_ts + step_ms
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+
+        if int(time.time() * 1000) - cursor < 0:
+            break
+
+    dedup = {}
+    for row in rows:
+        dedup[int(row[0])] = row
+    return [dedup[k] for k in sorted(dedup)]
+
+
+def _filtrar_ventana_fresca(rows: list, since: int, max_staleness_ms: int) -> list:
+    """Acepta solo datos live recientes del exchange dentro de la ventana solicitada."""
+    if not rows:
+        return []
+    now_ms = int(time.time() * 1000)
+    filtered = [row for row in rows if row and int(row[0]) >= since and int(row[0]) <= now_ms]
+    if not filtered:
+        return []
+    last_ts = int(filtered[-1][0])
+    if now_ms - last_ts > max_staleness_ms:
+        return []
+    return filtered
+
+
+def _fetch_1s(exchange: Any, symbol: str, limit: int = ONE_SEC_24H_LIMIT) -> pd.DataFrame:
+    """Obtiene velas de 1 segundo para el cálculo de recorrido interno de las últimas 24 horas."""
+    since = int(time.time() * 1000) - WINDOW_24H_MS
+    velas = _fetch_ohlcv_window(exchange, symbol, "1s", since, ONE_SEC_24H_LIMIT, ONE_SECOND_MS)
+    velas = _filtrar_ventana_fresca(velas, since, MAX_1S_STALENESS_MS)
+    if not velas or len(velas) < FIVE_MIN_24H_LIMIT:
         return pd.DataFrame()
     return pd.DataFrame(velas, columns=["ts", "open", "high", "low", "close", "volume"])
 
 
 def _alinear_velas(df5: pd.DataFrame, rec: pd.Series) -> pd.DataFrame:
-    """Alinea los datos de 5m con el recorrido real extraído de 1m."""
+    """Alinea los datos de 5m con el recorrido real extraído de 1s."""
     n = min(len(df5), len(rec))
     df5_aligned = df5.iloc[:n].copy()
     df5_aligned["recorrido_real"] = rec.iloc[:n].values
     return df5_aligned
 
 
-def _calcular_recorrido_real(df1: pd.DataFrame) -> pd.Series:
-    """Calcula el recorrido absoluto interno dentro de cada bloque de 5 minutos (usando velas de 1m)."""
-    df = df1.copy()
-    # Agrupamos en bloques de 5 velas (1m * 5 = 5m)
-    df["grupo"] = np.arange(len(df)) // 5
+def _calcular_recorrido_real(df1s: pd.DataFrame) -> pd.Series:
+    """Calcula el recorrido absoluto interno dentro de cada bloque de 5 minutos usando velas de 1s."""
+    df = df1s.copy()
+    # Agrupamos en bloques de 300 velas (1s * 300 = 5m).
+    df["grupo"] = np.arange(len(df)) // 300
     vals = []
     
     for _, g in df.groupby("grupo"):
@@ -477,7 +541,7 @@ def _calcular_score(ops, pct_util, consistencia, sim, osc, deriva, rango_vela_me
 
 
 
-def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None, timeframe: str = "5m", limit: int = 500) -> Optional[Dict[str, Any]]:
+def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None, timeframe: str = "5m", limit: int = FIVE_MIN_24H_LIMIT) -> Optional[Dict[str, Any]]:
     """Función orquestadora que analiza un símbolo aplicando todos los cálculos modulares."""
     try:
         market = exchange.markets.get(symbol, {}) if hasattr(exchange, 'markets') and exchange.markets else {}
@@ -492,7 +556,7 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         
         # 1. Extracción de datos
         df5 = _fetch_5m(exchange, symbol, limit)
-        df1 = _fetch_1m(exchange, symbol, limit)
+        df1 = _fetch_1s(exchange, symbol)
         
         if df5.empty or df1.empty:
             return None
@@ -605,6 +669,8 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         flattened = _flatten_analysis_profile(analysis_profile)
         flattened["analysis_profile"] = analysis_profile
         flattened["analysis"] = analysis_profile
+        flattened["df_5m"] = df5
+        flattened["df_1s"] = df1
 
         return flattened
     
@@ -613,7 +679,7 @@ def _analizar_simbolo_grid(exchange: Any, symbol: str, precio_vivo: float = None
         return None
 
 
-def analizar_lote(exchange: Any, simbolos: List[str], tickers_info: dict = None, timeframe: str = "5m", limit: int = 500, workers: int = 10, delay: float = 0) -> pd.DataFrame:
+def analizar_lote(exchange: Any, simbolos: List[str], tickers_info: dict = None, timeframe: str = "5m", limit: int = FIVE_MIN_24H_LIMIT, workers: int = 10, delay: float = 0) -> pd.DataFrame:
     """Analiza múltiples símbolos en paralelo y retorna un DataFrame clasificado."""
     res = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
