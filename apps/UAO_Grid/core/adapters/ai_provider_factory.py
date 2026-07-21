@@ -26,8 +26,7 @@ def get_api_providers() -> List[AIProviderPort]:
         if val:
             providers.append(OpenRouterAdapter(
                 api_key=val,
-                url="https://openrouter.ai/api/v1",
-                model="google/gemini-2.0-flash-001"
+                model="google/gemini-2.0-flash-001:free"
             ))
             
     # OpenAI
@@ -47,7 +46,7 @@ def get_api_providers() -> List[AIProviderPort]:
             providers.append(GroqAdapter(
                 api_key=val,
                 url="https://api.groq.com/openai/v1",
-                model="llama3-70b-8192"
+                model="llama-3.3-70b-versatile"
             ))
             
     # Anthropic (Official API)

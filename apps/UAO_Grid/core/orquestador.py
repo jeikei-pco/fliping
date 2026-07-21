@@ -18,10 +18,10 @@ from core.database import Database
 from core.providers import ExecutionProvider, OKXDemoAdapter, OKXRealAdapter
 from core.engine import GridEngine
 from core.analizador import analizar_lote
-from core.backtester import backtest_grid_top
 from core.okx_connector import obtener_futuros_usdt, filtrar_por_volumen
 from core.ai_optimizer import AIOptimizerWorker
 from core.okx_ws_client import OKXPrivateWS
+from core.backtester import backtest_grid_top, _backtest_grid_simbolo
 
 logger = logging.getLogger("UAO_Sclaping.GridOrquestador")
 
@@ -906,94 +906,100 @@ class GridOrquestador:
         }
         return data
 
-    def _analizar_y_backtestear(self) -> list:
-        """Retorna los symbols ganadores (hasta max_active_symbols)."""
-        try:
-            simbolos = obtener_futuros_usdt(self.exchange)
-            liquidos = filtrar_por_volumen(self.exchange, simbolos, self.min_volume)
-            
-            # FILTRO BLACKLIST
-            liquidos_filtrados = [s for s in liquidos if not self.db.es_lista_negra(s, self.mode)]
-            en_lista_negra = len(liquidos) - len(liquidos_filtrados)
-            liquidos = liquidos_filtrados
-            
-            if en_lista_negra > 0:
-                logger.info(f"🚫 [SCANNER] {en_lista_negra} símbolos ignorados por estar en la lista negra.")
-            
-            logger.info(f"🔍 [SCANNER] CCXT obtuvo {len(simbolos)} símbolos de futuros USDT.")
-            logger.info(f"🔍 [SCANNER] Se analizarán {len(liquidos)} símbolos líquidos: {liquidos}")
-            
-            # Obtener precios en vivo reales (Tickers) para no depender del cierre de vela retrasado
-            try:
-                tickers = self.exchange.fetch_tickers(liquidos)
-            except Exception as e:
-                logger.warning(f"⚠️ No se pudieron obtener tickers en vivo, se usará cierre de vela: {e}")
-                tickers = {}
-            
-            df_res = analizar_lote(self.exchange, liquidos, tickers, self.timeframe, self.limit)
-            
-            if df_res.empty: return []
-            
-            logger.info(f"📊 [SCANNER] Análisis completado. Resultados de TODOS los símbolos analizados:\n{df_res.to_string(index=False)}")
-            
-            # Enviamos a backtest TODOS los que pasaron el filtro inicial del escáner
-            top_analisis = df_res.to_dict(orient="records")
-            self.db.save_scanner_state(top_analisis, 1)
-            
-            # Obtener overrides de IA (Optimizador)
-            ia_overrides = self.db.get_config_overrides()
-            
-            logger.info(f"💹 Ejecutando Optimizador y Backtest direccional para {len(top_analisis)} símbolos...")
-            capital = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 50.0))
-            leverage_maximo = float(os.getenv("GRID_LEVERAGE", 15.0))
-            
-            bt_resultados = backtest_grid_top(self.exchange, top_analisis, capital, leverage_maximo, ia_overrides)
-            
-            if not hasattr(self, 'mejores_params'):
-                self.mejores_params = {}
-                
-            if bt_resultados:
-                # FIX 1: Guardar mejores_params de TODOS los símbolos backtesteados,
-                # no solo los top-N activos. Esto permite rotación a cualquier símbolo
-                # con sus params optimizados disponibles.
-                for resultado in bt_resultados:
-                    self.mejores_params[resultado['symbol']] = resultado
+    def _analizar_y_backtestear(self) -> list[str]:
+        """
+        Flujo completo: 
+        1. Analizador filtra los símbolos para operar.
+        2. Optimizador matemático calcula la configuración inicial por símbolo.
+        3. Se ejecuta el backtest base para obtener el Top 3 inicial.
+        4. Se envía el Top 3 a la IA en lote para optimización detallada por símbolo.
+        5. Se realiza el re-backtest para los 3 símbolos con los datos de la IA y se compara con el anterior.
+        6. Se seleccionan los 3 mejores resultados finales listos para operar.
+        """
+        from core.backtester import backtest_grid_top, _backtest_grid_simbolo
+        from core.optimizador import OptimizadorGrid
+        
+        logger.info("  [1/6] Analizando mercado y filtrando símbolos operables...")
+        simbolos_activos = obtener_futuros_usdt(self.exchange)
+        simbolos_operables = filtrar_por_volumen(self.exchange, simbolos_activos, self.min_volume)
+        
+        if not simbolos_operables:
+            logger.warning("  No hay símbolos que cumplan con el volumen mínimo.")
+            return []
 
-                # FIX 5: Loguear ranking completo con PnL para visibilidad total
-                logger.info("📈 [BACKTEST] Ranking completo por PnL estimado:")
-                for i, r in enumerate(bt_resultados):
-                    marker = "🏆" if i < self.max_active_symbols else "  "
-                    logger.info(
-                        "  %s #%02d %-25s | Modo: %-8s | Leverage: %2dx | PnL: $%8.4f | Ops: %4d | TF: %s",
-                        marker, i + 1, r['symbol'], r['modo'],
-                        r['apalancamiento'], r['pnl_neto'], r['operaciones'], r['timeframe']
-                    )
+        # 1. Analizador filtra los símbolos
+        df_analisis = analizar_lote(self.exchange, simbolos_operables, timeframe=self.timeframe, limit=self.limit)
+        if df_analisis.empty:
+            return []
 
-                # Solo los top-N activan engines nuevos
-                ganadores = bt_resultados[:self.max_active_symbols]
-                logger.info(
-                    "✅ [BACKTEST] Seleccionados %d/%d símbolo(s) para operar (max_active_symbols=%d)",
-                    len(ganadores), len(bt_resultados), self.max_active_symbols
-                )
+        top_analisis = df_analisis.head(self.top_n).to_dict("records")
+        capital_inicial = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 50.0))
+
+        logger.info("  [2 & 3] Ejecutando optimizador matemático y Backtest base para el Top...")
+        # Backtest base utilizando las métricas analizadas
+        resultados_backtest = backtest_grid_top(self.exchange, top_analisis, capital=capital_inicial)
+        if not resultados_backtest:
+            return []
+
+        # Seleccionar estrictamente el Top 3 inicial
+        top_3_iniciales = resultados_backtest[:3]
+        
+        resultados_finales = []
+        
+        # 4. Enviar a AI_Optimizer el Top 3 en un solo JSON (lote)
+        if self.ai_worker and top_3_iniciales:
+            logger.info("  [4/6] Enviando el lote del Top 3 de símbolos al AI Optimizer...")
+            ai_suggestions = self.ai_worker.optimizar_lote_top3(top_3_iniciales)
+            
+            for item in top_3_iniciales:
+                sym = item["symbol"]
+                overrides_simbolo = ai_suggestions.get(sym, {})
                 
-                # FIX 2: self.webhook_url no existe como atributo del objeto.
-                # Usar os.getenv directamente (igual que en _loop_operativo).
-                try:
-                    # FIX 2: WEBHOOK_URL viene del .env — usar .strip() por el espacio inicial
-                    _webhook_url = os.getenv("WEBHOOK_URL", "http://host.docker.internal:4000/api/webhook/grid").strip()
-                    webhook_url_bt = _webhook_url.replace("/webhook/grid", "/webhook/backtest")
-                    requests.post(webhook_url_bt, json=bt_resultados[:10], timeout=3)
-                except Exception as e:
-                    logger.debug(f"No se pudo enviar top 10 al webhook: {e}")
+                if overrides_simbolo:
+                    # Clamping de seguridad local para los parámetros sugeridos por la IA
+                    def clamp(val, min_val, max_val):
+                        return max(min_val, min(float(val), max_val))
                     
-                return [g["symbol"] for g in ganadores]
+                    if "GRID_STEP_PCT" in overrides_simbolo:
+                        overrides_simbolo["GRID_STEP_PCT"] = clamp(float(overrides_simbolo["GRID_STEP_PCT"]), 0.15, 5.0)
+                    if "GRID_DENSITY_FACTOR" in overrides_simbolo:
+                        overrides_simbolo["GRID_DENSITY_FACTOR"] = clamp(float(overrides_simbolo["GRID_DENSITY_FACTOR"]), 0.75, 1.25)
+                    if "LEVERAGE_FACTOR" in overrides_simbolo:
+                        overrides_simbolo["LEVERAGE_FACTOR"] = clamp(float(overrides_simbolo["LEVERAGE_FACTOR"]), 0.8, 1.15)
+                    if "CAPITAL_FACTOR" in overrides_simbolo:
+                        overrides_simbolo["CAPITAL_FACTOR"] = clamp(float(overrides_simbolo["CAPITAL_FACTOR"]), 0.7, 1.3)
 
-            # FIX 4: Fallback sin backtest — loguear advertencia y retornar por score del analizador
-            logger.warning(
-                "⚠️ [BACKTEST] Sin resultados válidos. Fallback: top-%d por score del analizador (sin params optimizados).",
-                self.max_active_symbols
-            )
-            return [top_analisis[i]["symbol"] for i in range(min(self.max_active_symbols, len(top_analisis)))]
-        except Exception as e:
-            logger.error(f"Error analizando mercados: {e}", exc_info=True)
-            return []  # FIX 3: era return "" — iterar sobre str vacío es un bug silencioso
+                    # Guardar en base de datos de manera específica por símbolo
+                    self.db.update_symbol_config_overrides(sym, overrides_simbolo)
+                    
+                    logger.info(f"  [5/6] Ejecutando Re-Backtest con configuración IA para {sym}...")
+                    analisis_original = item.get("analisis_original")
+                    if analisis_original:
+                        # Re-simular el backtest aplicando la optimización del símbolo
+                        res_nuevo = _backtest_grid_simbolo(self.exchange, analisis_original, capital_total=capital_inicial)
+                        
+                        # Comparativa: ¿Mejoró el PnL neto con la IA?
+                        if res_nuevo.get("pnl_neto", -999.0) != -999.0 and res_nuevo["pnl_neto"] > item["pnl_neto"]:
+                            logger.info(f"✨ [AI-WIN] La IA superó el PnL en {sym}: Base=$ {item['pnl_neto']:.2f} vs IA=$ {res_nuevo['pnl_neto']:.2f}")
+                            res_nuevo["timeframe"] = "5m"
+                            res_nuevo["modo"] = res_nuevo["modo_optimo"]
+                            res_nuevo["apalancamiento"] = res_nuevo["apalancamiento_usado"]
+                            resultados_finales.append(res_nuevo)
+                        else:
+                            logger.info(f"⚖️ [MATH-WIN] La configuración base fue mejor o igual para {sym}. Manteniendo base.")
+                            resultados_finales.append(item)
+                    else:
+                        resultados_finales.append(item)
+                else:
+                    resultados_finales.append(item)
+        else:
+            resultados_finales = top_3_iniciales
+
+        # Ordenar los resultados finales de mayor a menor PnL
+        resultados_finales.sort(key=lambda x: x["pnl_neto"], reverse=True)
+        
+        # Seleccionar el Top 3 final listo para operar en vivo/demo
+        top_3_symbols = [res["symbol"] for res in resultados_finales[:3]]
+        
+        logger.info(f"🚀 [6/6] Símbolos seleccionados y validados para iniciar operación: {top_3_symbols}")
+        return top_3_symbols

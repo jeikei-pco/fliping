@@ -4,9 +4,10 @@ import numpy as np
 from typing import Dict, Any
 
 class OptimizadorGrid:
-    def __init__(self, multiplicador_riesgo: float = 1.2, max_leverage: int = 20, overrides: Dict[str, Any] = None):
+    def __init__(self, multiplicador_riesgo: float = 1.2, max_leverage: int = 25, overrides: Dict[str, Any] = None):
         self.mult_riesgo = multiplicador_riesgo
         self.max_leverage = max_leverage
+        # Si no se pasan overrides específicos del símbolo, usa un diccionario vacío
         self.overrides = overrides or {}
 
     def optimizar_symbol(self, symbol: str, df: pd.DataFrame, capital_total: float, analisis: Dict[str, Any], modo: str = "NEUTRAL") -> Dict[str, Any]:

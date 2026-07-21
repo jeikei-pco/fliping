@@ -5,7 +5,7 @@ from core.ports.ai_provider_port import AIProviderPort
 logger = logging.getLogger("UAO_Sclaping.GeminiAdapter")
 
 class GeminiAdapter(AIProviderPort):
-    def __init__(self, api_key: str, model: str = "models/gemini-3-flash-preview"):
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
         self.api_key = api_key
         self.model = model
 
@@ -18,43 +18,28 @@ class GeminiAdapter(AIProviderPort):
             from google import genai
             import os
             
-            # El api_key puede provenir del Factory o directamente de os.environ
+            # Inicializar cliente de Google GenAI
             client = genai.Client(api_key=self.api_key or os.environ.get("GEMINI_API_KEY"))
             
-            tools = [
-                {
-                    'type': 'google_search',
-                },
-            ]
-            
-            generation_config = {
-                'temperature': 1,
-                'max_output_tokens': 65536,
-                'top_p': 0.95,
-                'thinking_level': 'high',
-                'response_mime_type': 'application/json' # Sugerencia para forzar JSON
+            # Configuración de generación estándar para la SDK v0.2+
+            config = {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "response_mime_type": "application/json",
+                "system_instruction": "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas."
             }
             
-            system_instruction = "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas."
-            full_prompt = f"{system_instruction}\n\n{prompt}"
-            
-            interaction = client.interactions.create(
+            # Llamada correcta al modelo de contenido
+            response = client.models.generate_content(
                 model=self.model,
-                input=full_prompt,
-                tools=tools,
-                generation_config=generation_config,
+                contents=prompt,
+                config=config,
             )
             
-            # Extraer el texto de la respuesta (interacción)
-            if hasattr(interaction, "text") and interaction.text:
-                return interaction.text
-            elif hasattr(interaction, "steps") and interaction.steps:
-                last_step = interaction.steps[-1]
-                if hasattr(last_step, "text"):
-                    return last_step.text
-                return str(last_step)
-            
-            return str(interaction)
+            if response and hasattr(response, "text") and response.text:
+                return response.text
+                
+            return None
         except Exception as e:
             logger.warning(f"Fallo proveedor {self.provider_name}: {e}")
             return None

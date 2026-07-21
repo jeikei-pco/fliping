@@ -454,3 +454,30 @@ class Database:
                 if row:
                     return json.loads(row['payload_json'])
         return None
+
+
+    def update_symbol_config_overrides(self, symbol: str, params: Dict[str, Any], updated_by: str = "AI_Optimizer"):
+        """Guarda configuraciones dinámicas generadas por la IA específicas para un símbolo."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                now = datetime.utcnow().isoformat()
+                for k, v in params.items():
+                    param_compound_key = f"{symbol}|{k}"
+                    cursor.execute('''
+                        INSERT INTO config_overrides (param_key, param_value, updated_by, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(param_key) DO UPDATE SET
+                            param_value=excluded.param_value,
+                            updated_by=excluded.updated_by,
+                            updated_at=excluded.updated_at
+                    ''', (param_compound_key, str(v), updated_by, now))
+                conn.commit()
+
+    def get_symbol_config_overrides(self, symbol: str) -> Dict[str, str]:
+        """Obtiene las configuraciones dinámicas específicas para un símbolo."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            prefix = f"{symbol}|"
+            cursor.execute("SELECT param_key, param_value FROM config_overrides WHERE param_key LIKE ?", (f"{prefix}%",))
+            return {row["param_key"].replace(prefix, ""): row["param_value"] for row in cursor.fetchall()}
