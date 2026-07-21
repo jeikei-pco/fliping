@@ -923,11 +923,11 @@ class GridOrquestador:
         """
         Flujo completo: 
         1. Analizador filtra los símbolos para operar.
-        2. Optimizador matemático calcula la configuración inicial por símbolo.
-        3. Se ejecuta el backtest base para obtener el Top 3 inicial.
-        4. Se envía el Top 3 a la IA en lote para optimización detallada por símbolo.
-        5. Se realiza el re-backtest para los 3 símbolos con los datos de la IA y se compara con el anterior.
-        6. Se seleccionan los 3 mejores resultados finales listos para operar.
+        2. Optimizador matemático calcula la configuración inicial por cada símbolo analizado.
+        3. Se ejecuta el backtest base para todos los símbolos candidatos.
+        4. Se envía el ranking inicial a la IA en lote para optimización detallada por símbolo.
+        5. Se realiza el re-backtest con los datos de la IA y se compara con el anterior.
+        6. Se seleccionan los 3 mejores resultados finales rentables listos para operar.
         """
         from core.backtester import backtest_grid_top, _backtest_grid_simbolo
         
@@ -944,23 +944,26 @@ class GridOrquestador:
         if df_analisis.empty:
             return []
 
-        top_analisis = df_analisis.head(self.top_n).to_dict("records")
+        analisis_candidatos = df_analisis.to_dict("records")
         capital_inicial = float(os.getenv("GRID_CAPITAL_POR_OPERACION", 50.0))
 
-        logger.info("  [2 & 3] Ejecutando optimizador matemático y Backtest base para el Top...")
-        # Backtest base utilizando las métricas analizadas
-        resultados_backtest = backtest_grid_top(self.exchange, top_analisis, capital=capital_inicial)
+        logger.info(
+            "  [2 & 3] Ejecutando optimizador matemático y Backtest base para %d símbolos analizados...",
+            len(analisis_candidatos),
+        )
+        # Backtest base utilizando las métricas analizadas para todos los símbolos candidatos.
+        resultados_backtest = backtest_grid_top(self.exchange, analisis_candidatos, capital=capital_inicial)
         if not resultados_backtest:
             return []
 
-        # Seleccionar estrictamente el Top 3 inicial
-        top_3_iniciales = resultados_backtest[:3]
+        # Seleccionar los mejores después de que todos pasaron por optimizador + backtest.
+        top_3_iniciales = resultados_backtest[:self.top_n]
         
         resultados_finales = []
         
-        # 4. Enviar a AI_Optimizer el Top 3 en un solo JSON (lote)
+        # 4. Enviar a AI_Optimizer el Top ya rankeado en un solo JSON (lote)
         if self.ai_worker and top_3_iniciales:
-            logger.info("  [4/6] Enviando el lote del Top 3 de símbolos al AI Optimizer...")
+            logger.info("  [4/6] Enviando el lote Top %d al AI Optimizer...", len(top_3_iniciales))
             ai_suggestions = self.ai_worker.optimizar_lote_top3(top_3_iniciales)
             
             for item in top_3_iniciales:
