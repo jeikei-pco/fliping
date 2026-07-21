@@ -13,6 +13,7 @@ import threading
 from typing import Dict, Any
 
 from core.database import Database
+from core.adapters.ai_provider_factory import get_api_providers
 
 logger = logging.getLogger("UAO_Sclaping.AIOptimizer")
 
@@ -21,7 +22,6 @@ class AIOptimizerWorker(threading.Thread):
         super().__init__(daemon=True)
         self.db = db
         self.intervalo = float(os.getenv("AI_OPTIMIZER_INTERVAL_HOURS", 24)) * 3600
-        self.api_url = os.getenv("AI_OPTIMIZER_API_URL", "http://127.0.0.1:8082/v1/messages")
 
     def run(self):
         logger.info(f"🤖 AI Optimizer iniciado. Consultará IA cada {self.intervalo/3600:.1f}h")
@@ -35,38 +35,6 @@ class AIOptimizerWorker(threading.Thread):
                 logger.error(f"❌ Error en AI Optimizer: {e}")
                 
             time.sleep(self.intervalo)
-
-    def _get_api_providers(self):
-        providers = []
-        
-        # Gemini (Native SDK)
-        for key_name in ["GEMINI_API_KEY", "GEMINI_API_KEY2", "GEMINI_API_KEY3"]:
-            val = os.getenv(key_name)
-            if val:
-                providers.append({"key": val, "model": "gemini-2.0-flash", "type": "gemini"})
-                
-        # OpenRouter
-        for key_name in ["OPENROUTER_API_KEY", "OPENROUTER_API_KEY2"]:
-            val = os.getenv(key_name)
-            if val:
-                providers.append({"url": "https://openrouter.ai/api/v1/chat/completions", "key": val, "model": "google/gemini-2.0-flash-001", "type": "openai"})
-                
-        # OpenAI
-        for key_name in ["OPENAI_API_KEY", "OPENAI_API_KEY2"]:
-            val = os.getenv(key_name)
-            if val:
-                providers.append({"url": "https://api.openai.com/v1/chat/completions", "key": val, "model": "gpt-4o-mini", "type": "openai"})
-                
-        # Groq
-        for key_name in ["GROQ_API_KEY"]:
-            val = os.getenv(key_name)
-            if val:
-                providers.append({"url": "https://api.groq.com/openai/v1/chat/completions", "key": val, "model": "llama3-70b-8192", "type": "openai"})
-                
-        # Claude (Local Proxy / Anthropic format)
-        providers.append({"url": self.api_url, "key": os.getenv("CLAUDE_CODE_PROXY_API_KEY", "freecc").strip(), "model": os.getenv("CLAUDE_CODE_MODEL", "claude-3-5-haiku-20241022"), "type": "anthropic"})
-        
-        return providers
 
     def _optimizar_global(self):
         logger.info("🧠 Solicitando micro-ajustes a la IA basados en contexto cuantitativo...")
@@ -196,115 +164,19 @@ IMPORTANTE: Responde ÚNICAMENTE con un objeto JSON válido, sin comillas invert
 Ejemplo:
 {{"GRID_STEP_PCT": 0.25, "GRID_DENSITY_FACTOR": 1.1, "LEVERAGE_FACTOR": 0.9, "CAPITAL_FACTOR": 1.0, "MAX_LEVERAGE": 15, "MIN_SCORE": 75, "MIN_CONSISTENCY": 0.7, "MIN_OSCILLATION": 2.5}}
 """
-        providers = self._get_api_providers()
+        providers = get_api_providers()
         
         content = ""
         success = False
         
         for provider in providers:
-            logger.info(f"Probando proveedor AI: {provider.get('url', 'Gemini Native')} (Modelo: {provider['model']})")
+            logger.info(f"Probando proveedor AI: {provider.provider_name}")
             
-            if provider["type"] == "gemini":
-                try:
-                    from google import genai
-                    from google.genai import types
-                    
-                    client = genai.Client(api_key=provider["key"])
-                    response = client.models.generate_content(
-                        model=provider['model'],
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction="Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas.",
-                            temperature=0.2
-                        )
-                    )
-                    content = response.text
-                    success = True
-                    break
-                except Exception as e:
-                    logger.warning(f"Fallo proveedor Gemini: {e}")
-                    continue
-
-            elif provider["type"] == "openai":
-                try:
-                    import openai
-                    
-                    base_url = provider["url"].replace("/chat/completions", "") if "url" in provider else None
-                    client = openai.OpenAI(api_key=provider["key"], base_url=base_url)
-                    
-                    kwargs = {
-                        "model": provider["model"],
-                        "messages": [
-                            {"role": "system", "content": "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "max_tokens": 1000
-                    }
-                    
-                    # Usar response_format solo si no es Groq
-                    if "groq" not in provider.get("url", ""):
-                        kwargs["response_format"] = {"type": "json_object"}
-                        
-                    response = client.chat.completions.create(**kwargs)
-                    content = response.choices[0].message.content
-                    success = True
-                    break
-                except Exception as e:
-                    logger.warning(f"Fallo proveedor {provider.get('url')}: {e}")
-                    continue
-                    
-            else:
-                # Fallback para Anthropic/Claude Code Proxy manual
-                body = {
-                    "model": provider["model"],
-                    "max_tokens": 1000,
-                    "system": "Eres un experto cuantitativo de IA. Respondes únicamente en JSON crudo sin comillas invertidas ni bloques de markdown ni explicaciones previas.",
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-                headers = {
-                    "content-type": "application/json", 
-                    "x-api-key": provider["key"], 
-                    "anthropic-version": "2023-06-01"
-                }
-            
-                request = urllib.request.Request(
-                    provider["url"],
-                    data=json.dumps(body).encode("utf-8"),
-                    headers=headers,
-                    method="POST",
-                )
-                
-                try:
-                    with urllib.request.urlopen(request, timeout=20) as response:
-                        raw = response.read().decode("utf-8", "replace")
-                        # Parseo Anthropic (SSE o JSON standard)
-                        try:
-                            payload = json.loads(raw)
-                            for item in payload.get("content", []):
-                                if isinstance(item, dict) and item.get("type") == "text":
-                                    content += item.get("text", "")
-                            success = True
-                            break
-                        except json.JSONDecodeError:
-                            for line in raw.splitlines():
-                                if line.startswith("data: "):
-                                    try:
-                                        data = json.loads(line[6:])
-                                        if data.get("type") == "content_block_delta":
-                                            delta = data.get("delta", {})
-                                            if delta.get("type") == "text_delta":
-                                                content += delta.get("text", "")
-                                        elif data.get("type") == "message" and "content" in data:
-                                            for item in data.get("content", []):
-                                                if isinstance(item, dict) and item.get("type") == "text":
-                                                    content += item.get("text", "")
-                                    except Exception:
-                                        pass
-                            success = True
-                            break
-                except Exception as e:
-                    logger.warning(f"Fallo proveedor {provider['url']}: {e}")
-                    continue
+            result = provider.generate_json(prompt)
+            if result:
+                content = result
+                success = True
+                break
                 
         if not success:
             logger.warning("⚠️ Todos los proveedores de IA fallaron. Usando OptimizadorGrid (Matemático) como respaldo.")
